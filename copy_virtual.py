@@ -97,20 +97,13 @@ def get_passphrase(profileFullPath):
             print ('Passphrases did not match, please re-enter.')
     return passphrase1
 
-def copy_cert_and_key(certFullPath, keyFullPath):
+def get_cert_and_key(certFullPath, keyFullPath):
     print('Cert FullPath: %s' % (certFullPath))
     print('Key FullPath: %s' % (keyFullPath))
     sourcessh = paramiko.SSHClient()
-    destinationssh = paramiko.SSHClient()
     sourcessh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     sourcessh.connect(args.sourcebigip, username=args.user, password=passwd, allow_agent=False)
-    destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
     sourcesftp = sourcessh.open_sftp()
-    destinationsftp = destinationssh.open_sftp()
-    destinationsftp.chdir('/tmp/')
-    destinationsftp.mkdir('_copy_virtual')
-    destinationsftp.chdir('_copy_virtual')
     certFolder = certFullPath.split("/")[1]
     keyFolder = keyFullPath.split("/")[1]
     filestore_basepath = '/config/filestore/files_d/%s_d' % (certFolder)
@@ -135,32 +128,45 @@ def copy_cert_and_key(certFullPath, keyFullPath):
     keyFile = keyFileRead.read()
     print('keyFile: %s' % (keyFile))
     keyFileRead.close()
-    certFileWrite = destinationsftp.open(certFullPath.replace("/", ":", 2), 'w')
-    certFileWrite.write(certFile)
+    certWithKey = {'cert': {'fullPath': certFullPath, 'certText': certFile}, 'key': {'fullPath': keyFullPath, 'keyText': keyFile}}
+    return certWithKey
+
+def put_cert_and_key(certWithKey):
+    print('Cert FullPath: %s' % (certWithKey['cert']['fullPath']))
+    print('Key FullPath: %s' % (certWithKey['key']['fullPath']))
+    destinationssh = paramiko.SSHClient()
+    destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
+    destinationsftp = destinationssh.open_sftp()
+    destinationsftp.chdir('/tmp/')
+    destinationsftp.mkdir('_copy_virtual')
+    destinationsftp.chdir('_copy_virtual')
+    certFileWrite = destinationsftp.open(certWithKey['cert']['fullPath'].replace("/", ":", 2), 'w')
+    certFileWrite.write(certWithKey['cert']['certText'])
     certFileWrite.close()
-    keyFileWrite = destinationsftp.open(keyFullPath.replace("/", ":", 2), 'w')
-    keyFileWrite.write(keyFile)
+    keyFileWrite = destinationsftp.open(certWithKey['key']['fullPath'].replace("/", ":", 2), 'w')
+    keyFileWrite.write(certWithKey['key'])
     keyFileWrite.close()
     cryptoPostPayload = {}
     cryptoPostPayload['command']='install'
     cryptoPostPayload['name']=certFullPath
-    cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (certFullPath.replace("/", ":", 2))
+    cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (certWithKey['cert']['fullPath'].replace("/", ":", 2))
     certPost = destinationbip.post('%s/sys/crypto/cert' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
     if certPost.status_code == 200:
-        print('Successfully Posted Cert: %s to destination BIG-IP' % (certFullPath))
+        print('Successfully Posted Cert: %s to destination BIG-IP' % (certWithKey['cert']['fullPath']))
     else:
-        print('Unsuccessful attempt to post cert: %s to destination with JSON: %s' % (certFullPath, cryptoPostPayload))
+        print('Unsuccessful attempt to post cert: %s to destination with JSON: %s' % (certWithKey['cert']['fullPath'], cryptoPostPayload))
         print('Body: %s' % (certPost.content))
-    cryptoPostPayload['name']=keyFullPath
-    cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (keyFullPath.replace("/", ":", 2))
+    cryptoPostPayload['name']=certWithKey['key']['fullPath']
+    cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (certWithKey['key']['fullPath'].replace("/", ":", 2))
     keyPost = destinationbip.post('%s/sys/crypto/key' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
     if keyPost.status_code == 200:
-        print('Successfully Posted Key: %s to destination BIG-IP' % (keyFullPath))
+        print('Successfully Posted Key: %s to destination BIG-IP' % (certWithKey['key']['fullPath']))
     else:
-        print('Unsuccessful attempt to post key: %s to destination with JSON: %s' % (keyFullPath, cryptoPostPayload))
+        print('Unsuccessful attempt to post key: %s to destination with JSON: %s' % (certWithKey['key']['fullPath'], cryptoPostPayload))
         print('Body: %s' % (keyPost.content))
-    destinationsftp.remove(certFullPath.replace("/", ":", 2))
-    destinationsftp.remove(keyFullPath.replace("/", ":", 2))
+    destinationsftp.remove(certWithKey['cert']['fullPath'].replace("/", ":", 2))
+    destinationsftp.remove(certWithKey['key']['fullPath'].replace("/", ":", 2))
     destinationsftp.rmdir('/tmp/_copy_virtual')
 
 def copy_virtual(virtualFullPath):
@@ -269,7 +275,7 @@ def copy_profile(profileFullPath):
     if sourceProfileTypeDict[profileFullPath] == 'client-ssl':
         print('Profile: %s is client-ssl' % (profileFullPath))
         if profileJson['cert'] not in destinationCertSet or profileJson['key'] not in destinationKeySet:
-            copy_cert_and_key(profileJson['cert'], profileJson['key'])
+            put_cert_and_key(get_cert_and_key(profileJson['cert'], profileJson['key']))
         if profileJson.get('passphrase'):
             print('Profile: %s uses a key with passphrase protection' % (profileFullPath))
             del profileJson['passphrase']
