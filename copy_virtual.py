@@ -149,7 +149,7 @@ def put_cert_and_key(certWithKey):
     keyFileWrite.close()
     cryptoPostPayload = {}
     cryptoPostPayload['command']='install'
-    cryptoPostPayload['name']=certFullPath
+    cryptoPostPayload['name']=certWithKey['cert']['fullPath']
     cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (certWithKey['cert']['fullPath'].replace("/", ":", 2))
     certPost = destinationbip.post('%s/sys/crypto/cert' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
     if certPost.status_code == 200:
