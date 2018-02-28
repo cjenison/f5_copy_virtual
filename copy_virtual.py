@@ -6,7 +6,6 @@
 # Version 1.1 - Significant paring down due to expandSubcollections usage; added support for IP change of virtual as it is copied
 #
 # Script that attempts to move a virtual (and all supporting configuration) from one BIG-IP to another
-# Short Term To-Do: As Pool is copied, check if persistence profile exists on destination and copy if not
 # Medium Term To-Do: Try to Handle Missing Cert/Keys by copying with scp
 # Medium Term To-Do: Enumerate Datagroups and diff source/destination - determine if irule text shows any string matches for named datagroups in the diff and prompt user for whether datagroups should be copied
 # Long Term To-Do: Ensure Target Partition/Folder is in place; optionally allow movement of configuration objects from a source partition to a different target partition (including supporting objects)
@@ -32,6 +31,9 @@ virtual = parser.add_mutually_exclusive_group()
 virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual Server(s) to attach to (with full path [e.g. /Common/test])')
 virtual.add_argument('--allvirtuals', '-a', help="Copy all virtuals to target system that aren't already found")
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
+parser.add_argument('--destsuffix', help='Use a suffix for configuration objects on destination [do not re-use existing objects already on destination]')
+parser.add_argument('--offlinewrite', help='Store Configuration JSON to a file (provide filename)')
+parser.add_argument('--offlineread', help='Read Configuration JSON from a file (provide filename)')
 parser.add_argument('--disableonsource', '-disable', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination')
 parser.add_argument('--noprompt', '-n', help='Do not prompt for confirmation of copying operations', action='store_true')
@@ -53,7 +55,7 @@ def query_yes_no(question, default="no"):
         raise ValueError("invalid default answer: '%s'" % default)
     while 1:
         sys.stdout.write(question + prompt)
-        choice = raw_input().lower() 
+        choice = raw_input().lower()
         if default is not None and choice == '':
             return valid[default]
         elif choice in valid.keys():
@@ -61,7 +63,7 @@ def query_yes_no(question, default="no"):
         else:
             sys.stdout.write("Please respond with 'yes' or 'no' (or 'y' or 'n').\n")
 
-#adapted from https://devcentral.f5.com/articles/demystifying-icontrol-rest-6-token-based-authentication 
+#adapted from https://devcentral.f5.com/articles/demystifying-icontrol-rest-6-token-based-authentication
 def get_auth_token(bigip, username, passwd):
     bip = requests.session()
     bip.verify = False
@@ -73,14 +75,15 @@ def get_auth_token(bigip, username, passwd):
     token = bip.post(authurl, headers=contentTypeJsonHeader, auth=(args.user, passwd), data=json.dumps(payload)).json()['token']['token']
     return token
 
-def get_active_software_version(bigip, authHeader)
+def get_active_software_version(bigip, authHeader):
     bip = requests.session()
     bip.verify = False
     bip.headers.update(authHeader)
-    volumes = bip.get('https://%s/mgmt/tm/sys/software/volume' % (bigip))
+    volumes = bip.get('https://%s/mgmt/tm/sys/software/volume' % (bigip)).json()
     for volume in volumes['items']:
-        if volume['active'] == 'true':
-            activeVersion = volume['version']
+        if volume.get('active'):
+            if volume['active'] == True:
+                activeVersion = volume['version']
     return activeVersion
 
 def get_passphrase(profileFullPath):
@@ -164,12 +167,12 @@ def copy_virtual(virtualFullPath):
     virtualJson = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
     del virtualJson['selfLink']
     if virtualJson.get('pool'):
-        if virtualJson['pool'] not in destinationPoolSet: 
+        if virtualJson['pool'] not in destinationPoolSet:
             copy_pool(virtualJson['pool'])
         else:
             print('Pool: %s - Already on destination and left in place' % (virtualJson['pool']))
     if virtualJson.get('sourceAddressTranslation').get('pool'):
-        if virtualJson['sourceAddressTranslation']['pool'] not in destinationSnatpoolSet: 
+        if virtualJson['sourceAddressTranslation']['pool'] not in destinationSnatpoolSet:
             copy_snatpool(virtualJson['sourceAddressTranslation']['pool'])
         else:
             print('Snatpool: %s - Already on destination' % (virtualJson['sourceAddressTranslation']['pool']))
@@ -237,7 +240,7 @@ def obtain_new_vs_destination(destination, port, mask):
             inputChecked = True
     else:
         newDestination = destination
-            
+
     changePort = 'Port: %s - Change?' % (port)
     if query_yes_no(changePort, default="yes"):
         inputChecked = False
@@ -332,7 +335,7 @@ def copy_pool(poolFullPath):
     poolJson = sourcebip.get('%s/ltm/pool/%s' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
     del poolJson['selfLink']
     if poolJson.get('monitor'):
-        for monitor in poolJson['monitor'].strip().split(" and "): 
+        for monitor in poolJson['monitor'].strip().split(" and "):
             if monitor not in destinationMonitorSet:
                 copy_monitor(monitor)
     copiedPool = destinationbip.post('%s/ltm/pool/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(poolJson))
@@ -447,6 +450,16 @@ def generate_destination_sets():
     for rule in destinationRules['items']:
         destinationRuleSet.add(rule['fullPath'])
 
+    destinationInternalDatagroups = destinationbip.get('%s/ltm/data-group/internal/' % (destinationurl_base)).json()
+    if destinationInternalDatagroups.get('items'):
+        for datagroup in destinationInternalDatagroups['items']:
+            destinationDatagroupSet.add(datagroup['fullPath'])
+
+    destinationExternalDatagroups = destinationbip.get('%s/ltm/data-group/external/' % (destinationurl_base)).json()
+    if destinationExternalDatagroups.get('items'):
+        for datagroup in destinationExternalDatagroups['items']:
+            destinationDatagroupSet.add(datagroup['fullPath'])
+
     destinationSnatpools = destinationbip.get('%s/ltm/snatpool/' % (destinationurl_base)).json()
     for snatpool in destinationSnatpools['items']:
         destinationSnatpoolSet.add(snatpool['fullPath'])
@@ -483,7 +496,9 @@ destinationAuthToken = get_auth_token(args.destinationbigip, args.user, passwd)
 destinationAuthHeader = {'X-F5-Auth-Token': destinationAuthToken}
 destinationbip.headers.update(destinationAuthHeader)
 sourceVersion = get_active_software_version(args.sourcebigip, sourceAuthHeader)
+print('Source BIG-IP Version: %s' % (sourceVersion))
 destinationVersion = get_active_software_version(args.destinationbigip, destinationAuthHeader)
+print('Destination BIG-IP Version: %s' % (destinationVersion))
 
 # combine two Python Dicts (our auth token and the Content-type json header) in preparation for doing POSTs
 sourcePostHeaders = sourceAuthHeader
@@ -502,16 +517,33 @@ destinationPolicySet = set()
 destinationPolicyStrategySet = set()
 destinationPersistenceSet = set()
 destinationSnatpoolSet = set()
+destinationDatagroupSet = set()
 generate_destination_sets()
 
 destinationVirtualSet = set()
+
 destinationVirtuals = destinationbip.get('%s/ltm/virtual/' % (destinationurl_base)).json()
 if destinationVirtuals.get('items'):
     for virtual in destinationVirtuals['items']:
         destinationVirtualSet.add(virtual['fullPath'])
 
 #print('destinationVirtualSet: %s' % (destinationVirtualSet))
-    
+
+missingDatagroupSet = set()
+sourceInternalDatagroups = sourcebip.get('%s/ltm/data-group/internal/' % (sourceurl_base)).json()
+if sourceInternalDatagroups.get('items'):
+    for datagroup in sourceInternalDatagroups['items']:
+        if datagroup['fullPath'] not in destinationDatagroupSet:
+            missingDatagroupSet.add(datagroup['fullPath'])
+
+sourceExternalDatagroups = sourcebip.get('%s/ltm/data-group/external/' % (sourceurl_base)).json()
+if sourceExternalDatagroups.get('items'):
+    for datagroup in sourceExternalDatagroups['items']:
+        if datagroup['fullPath'] not in destinationDatagroupSet:
+            missingDatagroupSet.add(datagroup['fullPath'])
+
+print ('missingDatagroupSet: %s' % datagroup['fullPath'])
+
 sourceProfileTypeDict = dict()
 sourceProfiles = sourcebip.get('%s/ltm/profile/' % (sourceurl_base)).json()
 for profile in sourceProfiles['items']:
