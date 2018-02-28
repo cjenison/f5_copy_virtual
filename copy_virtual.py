@@ -145,7 +145,7 @@ def put_cert_and_key(certWithKey):
     certFileWrite.write(certWithKey['cert']['certText'])
     certFileWrite.close()
     keyFileWrite = destinationsftp.open(certWithKey['key']['fullPath'].replace("/", ":", 2), 'w')
-    keyFileWrite.write(certWithKey['key'])
+    keyFileWrite.write(certWithKey['key']['keyText'])
     keyFileWrite.close()
     cryptoPostPayload = {}
     cryptoPostPayload['command']='install'
