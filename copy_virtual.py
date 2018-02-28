@@ -221,8 +221,8 @@ def copy_virtual(virtualFullPath):
         if query_yes_no(changeDestination, default="yes"):
             newDestination = obtain_new_vs_destination(virtualJson['destination'].split("/")[2].rsplit(":", 1)[0], virtualJson['destination'].split("/")[2].rsplit(":", 1)[1], virtualJson['mask'])
             destinationPartition = virtualJson['destination'].split("/")[1]
-            virtualJson['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination.split(" ")[0], newDestination.split(" ")[1])
-            virtualJson['mask'] = newDestination.split(" ")[2]
+            virtualJson['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
+            virtualJson['mask'] = newDestination['mask']
     copiedVirtual = destinationbip.post('%s/ltm/virtual/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(virtualJson))
     if copiedVirtual.status_code == 200:
         print('Successfully Copied Virtual: %s' % (virtualFullPath))
@@ -261,7 +261,8 @@ def obtain_new_vs_destination(destination, port, mask):
     else:
         newMask = mask
 
-    return '%s %s %s' % (newDestination, newPort, newMask)
+    destination = {'ip': newDestination, 'port':newPort, 'mask':newMask}
+    return destination
 
 def copy_profile(profileFullPath):
     profileJson = sourcebip.get('%s/ltm/profile/%s/%s' % (sourceurl_base, sourceProfileTypeDict[profileFullPath], profileFullPath.replace("/", "~", 2))).json()
