@@ -30,8 +30,8 @@ parser.add_argument('--sourcebigip', '-s', help='IP or hostname of Source BIG-IP
 parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destination BIG-IP Management or Self IP')
 parser.add_argument('--user', '-u', help='username to use for authentication', required=True)
 virtual = parser.add_mutually_exclusive_group()
-virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual Server(s) to attach to (with full path [e.g. /Common/test])')
-virtual.add_argument('--allvirtuals', '-a', help="Select all virtuals to target system that aren't already found", action='store_true')
+virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual server(s) on source to select (example: vs-1 or /Public/vs-1)')
+virtual.add_argument('--allvirtuals', '-a', help="Select all virtual servers on source system", action='store_true')
 mode = parser.add_mutually_exclusive_group()
 mode.add_argument('--copy', '-c', help='Copy from source to destination BIG-IP (online for both systems)', action='store_true')
 mode.add_argument('--write', '-w', help='Write JSON File Output (provide filename)')
@@ -82,16 +82,24 @@ def get_auth_token(bigip, username, passwd):
     token = bip.post(authurl, headers=contentTypeJsonHeader, auth=(args.user, passwd), data=json.dumps(payload)).json()['token']['token']
     return token
 
-def get_active_software_version(bigip, authHeader):
+def get_system_info(bigip, authHeader):
+    systemInfo = dict()
     bip = requests.session()
     bip.verify = False
     bip.headers.update(authHeader)
+    globalSettings = bip.get('https://%s/mgmt/tm/sys/global-settings/' % (bigip)).json()
+    hardware = bip.get('https://%s/mgmt/tm/sys/hardware' % (bigip)).json()
+    systemInfo['baseMac'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['baseMac']['description']
+    systemInfo['marketingName'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['marketingName']['description']
     volumes = bip.get('https://%s/mgmt/tm/sys/software/volume' % (bigip)).json()
     for volume in volumes['items']:
         if volume.get('active'):
             if volume['active'] == True:
                 activeVersion = volume['version']
-    return activeVersion
+    systemInfo['version'] = activeVersion
+    systemInfo['hostname'] = globalSettings['hostname']
+    print ('systemInfo: %s' % (json.dumps(systemInfo, indent=4)))
+    return systemInfo
 
 def get_passphrase(profileFullPath):
     confirmedMatch = False
@@ -233,18 +241,18 @@ def get_virtual(virtualFullPath):
     #    print('Body: %s' % (copiedVirtual.content))
 
 def put_virtual(virtualFullPath, virtualConfigArray):
-    print('Attempting Put of Virtual: %s to BIG-IP: %s' % (virtualFullPath, args.destinationbigip))
+    print('**Processing Virtual: %s to BIG-IP: %s' % (virtualFullPath, args.destinationbigip))
     for configObject in virtualConfigArray:
         put_json(configObject['fullPath'], configObject)
 
 def put_json(fullPath, configDict):
-    print('fullPath Argument: %s' % (fullPath))
-    print('fullPath fromDict: %s' % (configDict['fullPath']))
-    print('kind: %s' % (configDict['kind']))
+    #print('fullPath Argument: %s' % (fullPath))
+    #print('fullPath fromDict: %s' % (configDict['fullPath']))
+    #print('kind: %s' % (configDict['kind']))
     objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
     postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
     print ('objectUrl: %s' % (objectUrl))
-    print ('postUrl: %s' % (postUrl))
+    #print ('postUrl: %s' % (postUrl))
     destinationObjectGet = destinationbip.get(objectUrl)
     if destinationObjectGet.status_code == 200:
         print('config object: %s already on destination; leaving in place' % (fullPath))
@@ -257,6 +265,7 @@ def put_json(fullPath, configDict):
                     destinationPartition = configDict['destination'].split("/")[1]
                     configDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
                     configDict['mask'] = newDestination['mask']
+                    print ('New Destination: %s - port: %s mask: %s' % (newDestination['ip'], newDestination['port'], newDestination['mask']))
             if args.disableondestination:
                 if configDict.get('enabled'):
                     del configDict['enabled']
@@ -428,7 +437,8 @@ if args.destinationbigip and (args.copy or args.read):
     destinationAuthToken = get_auth_token(args.destinationbigip, args.user, passwd)
     destinationAuthHeader = {'X-F5-Auth-Token': destinationAuthToken}
     destinationbip.headers.update(destinationAuthHeader)
-    destinationVersion = get_active_software_version(args.destinationbigip, destinationAuthHeader)
+    destinationSystemInfo = get_system_info(args.destinationbigip, destinationAuthHeader)
+    destinationVersion = destinationSystemInfo['version']
     print('Destination BIG-IP Version: %s' % (destinationVersion))
     destinationPostHeaders = destinationAuthHeader
     destinationPostHeaders.update(contentTypeJsonHeader)
@@ -453,7 +463,8 @@ if args.sourcebigip and (args.copy or args.write):
     sourceAuthToken = get_auth_token(args.sourcebigip, args.user, passwd)
     sourceAuthHeader = {'X-F5-Auth-Token': sourceAuthToken}
     sourcebip.headers.update(sourceAuthHeader)
-    sourceVersion = get_active_software_version(args.sourcebigip, sourceAuthHeader)
+    sourceSystemInfo = get_system_info(args.sourcebigip, sourceAuthHeader)
+    sourceVersion = sourceSystemInfo['version']
     print('Source BIG-IP Version: %s' % (sourceVersion))
     sourcePostHeaders = sourceAuthHeader
     sourcePostHeaders.update(contentTypeJsonHeader)
@@ -488,9 +499,10 @@ if args.sourcebigip and (args.copy or args.write):
     sourceVirtualDict = dict()
     sourceVirtualSet = set()
     sourceVirtuals = sourcebip.get('%s/ltm/virtual/' % (sourceurl_base)).json()
-    for virtual in sourceVirtuals['items']:
-        sourceVirtualDict[virtual['name']] = virtual['fullPath']
-        sourceVirtualSet.add(virtual['fullPath'])
+    if sourceVirtuals.get('items'):
+        for virtual in sourceVirtuals['items']:
+            sourceVirtualDict[virtual['name']] = virtual['fullPath']
+            sourceVirtualSet.add(virtual['fullPath'])
 
     sourceDatagroupSet = set()
     sourceInternalDatagroups = sourcebip.get('%s/ltm/data-group/internal/' % (sourceurl_base)).json()
@@ -503,9 +515,14 @@ if args.sourcebigip and (args.copy or args.write):
         for datagroup in sourceExternalDatagroups['items']:
             sourceDatagroupSet.add(datagroup['fullPath'])
 
+theData = dict()
 virtualsList = []
 
 if args.copy or args.write:
+    theData['version'] = sourceSystemInfo['version']
+    theData['hostname'] = sourceSystemInfo['hostname']
+    theData['baseMac'] = sourceSystemInfo['baseMac']
+    theData['marketingName'] = sourceSystemInfo['marketingName']
     if args.virtual is not None:
         virtuals = args.virtual
     elif args.allvirtuals:
@@ -536,20 +553,30 @@ if args.copy or args.write:
             #    print('Virtual: %s already present on destination' % (virtual))
         else:
             print ('Virtual: %s not found on source BIG-IP' % (virtual))
-        print json.dumps(virtualsList, indent=4, sort_keys=True)
+    theData['virtuals'] = virtualsList
     if args.write:
-        with open(args.write, 'w') as jsonVirtuals:
-            json.dump(virtualsList, jsonVirtuals, indent=4, sort_keys=True)
+        with open(args.write, 'w') as fileOut:
+            json.dump(theData, fileOut, indent=4, sort_keys=True)
 
 
 
 if args.copy or args.read:
     if args.read:
-        print('Reading from file')
-        with open(args.read) as jsonVirtuals:
-            virtualsList = json.load(jsonVirtuals)
-        #print json.dumps(virtualsList, indent=4, sort_keys=True)
-        for virtual in virtualsList:
-            put_virtual(virtual['virtualFullPath'], virtual['virtualListConfig'])
+        print('Reading Virtual Config Data from file: %s' % (args.read))
+        with open(args.read, 'r') as fileIn:
+            theData = json.load(fileIn)
     elif args.copy:
-        print json.dumps(virtualsList, indent=4, sort_keys=True)
+        print ('Copy Mode: beginning copy of virtuals to destination')
+    sourceShortVersion = float('%s.%s' % (theData['version'].split(".")[0], theData['version'].split(".")[1]))
+    destinationShortVersion = float('%s.%s' % (destinationSystemInfo['version'].split(".")[0], destinationSystemInfo['version'].split(".")[1]))
+    if sourceShortVersion > destinationShortVersion:
+        print ('Houston We Have a Problem')
+        downgradeString = 'You are copying configuration data from %s to %s; which is untested and likely to break; proceed?' % (theData['version'], destinationSystemInfo['version'])
+        if query_yes_no(downgradeString, default="no"):
+            print('Proceeding with caution; errors are likely.')
+        else:
+            quit()
+    virtualsList = theData['virtuals']
+    #print json.dumps(virtualsList, indent=4, sort_keys=True)
+    for virtual in virtualsList:
+        put_virtual(virtual['virtualFullPath'], virtual['virtualListConfig'])
