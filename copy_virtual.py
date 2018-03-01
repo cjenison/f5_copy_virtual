@@ -171,7 +171,6 @@ def put_cert_and_key(certWithKey):
     destinationsftp.rmdir('/tmp/_copy_virtual')
 
 def get_virtual(virtualFullPath):
-    virtualConfig = []
     virtualDict = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
     del virtualDict['selfLink']
     if virtualDict.get('pool'):
@@ -248,106 +247,74 @@ def obtain_new_vs_destination(destination, port, mask):
     destination = {'ip': newDestination, 'port':newPort, 'mask':newMask}
     return destination
 
-def copy_profile(profileFullPath):
-    profileJson = sourcebip.get('%s/ltm/profile/%s/%s' % (sourceurl_base, sourceProfileTypeDict[profileFullPath], profileFullPath.replace("/", "~", 2))).json()
+def get_profile(profileFullPath):
+    profileDict = sourcebip.get('%s/ltm/profile/%s/%s' % (sourceurl_base, sourceProfileTypeDict[profileFullPath], profileFullPath.replace("/", "~", 2))).json()
     if sourceProfileTypeDict[profileFullPath] == 'client-ssl':
         print('Profile: %s is client-ssl' % (profileFullPath))
-        if profileJson['cert'] not in destinationCertSet or profileJson['key'] not in destinationKeySet:
-            put_cert_and_key(get_cert_and_key(profileJson['cert'], profileJson['key']))
-        if profileJson.get('passphrase'):
+        #if args.getcert:
+        #    get_cert_and_key(profileDict['cert'], profileDict['key'])
+        if profileDict.get('passphrase'):
             print('Profile: %s uses a key with passphrase protection' % (profileFullPath))
-            del profileJson['passphrase']
-            del profileJson['certKeyChain']
-            passphrase = get_passphrase(profileJson['fullPath'])
-            profileJson['passphrase'] = passphrase
+            del profileDict['passphrase']
+            # Investigate Chained Certs
+            #del profileJson['certKeyChain']
+            passphrase = get_passphrase(profileDict['fullPath'])
+            profileDict['passphrase'] = passphrase
         else:
             print('Profile: %s does not use passphrase protection' % (profileFullPath))
-    del profileJson['selfLink']
-    copiedProfile = destinationbip.post('%s/ltm/profile/%s' % (destinationurl_base, sourceProfileTypeDict[profileFullPath]), headers=destinationPostHeaders, data=json.dumps(profileJson))
-    if copiedProfile.status_code == 200:
-        print ('Successfully Copied %s Profile: %s' % (sourceProfileTypeDict[profileFullPath], profileFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy %s profile: %s ; StatusCode: %s' % (sourceProfileTypeDict[profileFullPath], profileFullPath, copiedProfile.status_code))
-        print ('Body: %s' % (copiedProfile.content))
+    return profileDict
 
 def get_rule(ruleFullPath):
-    ruleJson = sourcebip.get('%s/ltm/rule/%s' % (sourceurl_base, ruleFullPath.replace("/", "~", 2))).json()
-    return ruleJson
+    ruleDict = sourcebip.get('%s/ltm/rule/%s' % (sourceurl_base, ruleFullPath.replace("/", "~", 2))).json()
+    return ruleDict
 
 def get_persistence(persistenceFullPath):
-    persistenceJson = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))).json()
-    return persistenceJson
+    persistenceDict = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))).json()
+    return persistenceDict
 
 def get_monitor(monitorFullPath):
-    monitorJson = sourcebip.get('%s/ltm/monitor/%s/%s' % (sourceurl_base, sourceMonitorTypeDict[monitorFullPath], monitorFullPath.replace("/", "~", 2))).json()
-    return monitorJson
+    monitorDict = sourcebip.get('%s/ltm/monitor/%s/%s' % (sourceurl_base, sourceMonitorTypeDict[monitorFullPath], monitorFullPath.replace("/", "~", 2))).json()
+    return monitorDict
 
-def copy_snatpool(snatpoolFullPath):
-    snatpoolJson = sourcebip.get('%s/ltm/snatpool/%s' % (sourceurl_base, snatpoolFullPath.replace("/", "~", 2))).json()
-    return snatpoolJson
+def get_snatpool(snatpoolFullPath):
+    snatpoolDict = sourcebip.get('%s/ltm/snatpool/%s' % (sourceurl_base, snatpoolFullPath.replace("/", "~", 2))).json()
+    return snatpoolDict
 
 def get_pool(poolFullPath):
-    poolDict = sourcebip.get('%s/ltm/pool/%s' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
-    del poolDict['selfLink']
+    poolDict = sourcebip.get('%s/ltm/pool/%s?expandSubcollections=true' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
     if poolDict.get('monitor'):
-        for monitor in poolDict['monitor'].strip().split(" and "):
+        for monitor in poolDict['monitor'].strip().split(' and '):
             virtualConfig.append(get_monitor(monitor))
-        membersJson = sourcebip.get('%s/ltm/pool/%s/members' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
         for member in poolDict['membersReference']['items']:
-            del member['state']
-            del member['selfLink']
-            del member['session']
             if member['monitor'] != 'default':
-                print('Member: %s has monitor: %s' % (member['name'], member['monitor']))
-		        for monitor in member['monitor'].strip().split(" and "):
-                    virtualConfig.get(get_monitor(monitor))
+                for monitor in member['monitor'].strip().split(' and '):
+                    virtualConfig.append(get_monitor(monitor))
     return poolDict
 
-def copy_policy(policyFullPath):
-    policyJson = sourcebip.get('%s/ltm/policy/%s' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
-    del policyJson['selfLink']
-    del policyJson['fullPath']
-    del policyJson['rulesReference']
+def get_policy(policyFullPath):
+    policyDict = sourcebip.get('%s/ltm/policy/%s?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
+    #del policyDict['fullPath']
     ### with 12.1.x+; policies now have "Drafts" or "Published" status (https://support.f5.com/csp/article/K33749970)
     ### need to add code to handle this stuff
-    del policyJson['status']
-    policyJson['subPath']='Drafts'
-    if policyJson['strategy'] not in destinationPolicyStrategySet:
-        copy_policy_strategy(policyJson['strategy'])
-    copiedPolicy = destinationbip.post('%s/ltm/policy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(policyJson))
-    if copiedPolicy.status_code == 200:
-        print ('Successfully Copied Policy: %s' % (policyFullPath))
-    else:
-        print ('Unsuccessful attempt to copy policy: %s ; StatusCode: %s' % (policyFullPath, copiedPolicy.status_code))
-        print ('Body: %s' % (copiedPolicy.content))
-    rulesJson = sourcebip.get('%s/ltm/policy/%s/rules?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
-    draftFullPath = '/%s/Drafts/%s' % (policyFullPath.split("/")[1], policyFullPath.split("/")[2])
-    print ('draftFullPath: %s' % (draftFullPath))
-    if rulesJson.get('items'):
-        for rule in rulesJson['items']:
-            print('rule: %s' % (rule['name']))
-            copiedRule = destinationbip.post('%s/ltm/policy/%s/rules/' % (destinationurl_base, draftFullPath.replace("/", "~", 3)), headers=destinationPostHeaders, data=json.dumps(rule))
-            if copiedRule.status_code == 200:
-                print('Successfully Copied Rule: %s' % (rule['fullPath']))
-            else:
-                print ('Unsuccessful attempt to copy rule: %s ; StatusCode: %s' % (rule['name'], copiedRule.status_code))
-                print ('Body: %s' % (copiedRule.content))
-    publishCommand = {'command': "publish", 'name': draftFullPath }
-    destinationbip.post('%s/ltm/policy' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(publishCommand))
-    print ('Finished copying Policy: %s' % (policyFullPath))
-    generate_destination_sets()
+    if policyDict.get('status'):
+        print('Our source machine is likely 12.1.x or later')
+    if policyDict.get('controls'):
+        print('Our Source machine may be pre-12.1')
+    #policyDict.getpolicyDict['subPath']='Drafts'
+    #to get policies published on 12.1 or later, gotta put a a subPath of Drafts in
+    virtualDict.append(get_policy_strategy(policyDict['strategy']))
+    #copiedPolicy = destinationbip.post('%s/ltm/policy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(policyJson))
+    rulesDict = policyDict['rulesReference']
+    #draftFullPath = '/%s/Drafts/%s' % (policyFullPath.split("/")[1], policyFullPath.split("/")[2])
+    #print ('draftFullPath: %s' % (draftFullPath))
+    #publishCommand = {'command': "publish", 'name': draftFullPath }
+    #destinationbip.post('%s/ltm/policy' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(publishCommand))
+    print ('Finished getting Policy: %s' % (policyFullPath))
+    return policyDict
 
-def copy_policy_strategy(policyStrategyFullPath):
-    policyStrategyJson = sourcebip.get('%s/ltm/policy-strategy/%s' % (sourceurl_base, policyStrategyFullPath.replace("/", "~", 2))).json()
-    del policyStrategyJson['selfLink']
-    copiedPolicyStrategy = destinationbip.post('%s/ltm/policy-strategy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(policyStrategyJson))
-    if copiedPolicyStrategy.status_code == 200:
-        print ('Successfully Copied Policy-Strategy: %s' % (policyStrategyFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy policy strategy: %s ; StatusCode: %s' % (policyStrategyFullPath, copiedPolicyStrategy.status_code))
-        print ('Body: %s' % (copiedPolicyStrategy.content))
+def get_policy_strategy(policyStrategyFullPath):
+    policyStrategyDict = sourcebip.get('%s/ltm/policy-strategy/%s' % (sourceurl_base, policyStrategyFullPath.replace("/", "~", 2))).json()
+    return policyStrategyDict
 
 def generate_destination_sets():
     destinationProfileTypes = destinationbip.get('%s/ltm/profile/' % (destinationurl_base)).json()
@@ -446,6 +413,7 @@ if args.destinationbigip:
     destinationPersistenceSet = set()
     destinationSnatpoolSet = set()
     destinationDatagroupSet = set()
+    # Generate Destination Object Sets (to check for existence)
     generate_destination_sets()
     destinationVirtualSet = set()
     destinationVirtuals = destinationbip.get('%s/ltm/virtual/' % (destinationurl_base)).json()
@@ -520,11 +488,13 @@ virtualsList = []
 if args.virtual is not None:
     for virtual in args.virtual:
         sourceVirtual = dict()
+        virtualConfig = []
         if virtual in sourceVirtualSet:
             print ('Virtual(s) to copy: %s' % (virtual))
-            sourceVirtualDict = get_virtual(virtual)
+            #sourceVirtualConfig = get_virtual(virtual)
             sourceVirtual['name'] = virtual
-            sourceVirtual['config'] = sourceVirtualDict
+            sourceVirtual['config'] = get_virtual(virtual)
+            print('Virtual JSON: %s' % json.dumps(sourceVirtual['config']))
             virtualsList.append(sourceVirtual)
             #if virtual not in destinationVirtualSet:
             #    print('Copying virtual: %s' % (virtual))
@@ -533,9 +503,9 @@ if args.virtual is not None:
             #    print('Virtual: %s already present on destination' % (virtual))
         elif virtual in sourceVirtualDict.keys():
             print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
-            sourceVirtualDict = get_virtual(sourceVirtualDict[virtual])
-            sourceVirtual['name'] = sourceVirtualDict[virtua]
-            sourceVirtual['config'] = sourceVirtualDict
+            sourceVirtual['name'] = sourceVirtualDict[virtual]
+            sourceVirtual['config'] = get_virtual(sourceVirtualDict[virtual])
+            print('Virtual JSON: %s' % json.dumps(sourceVirtual['config']))
             virtualsList.append(sourceVirtual)
             #if sourceVirtualDict[virtual] not in destinationVirtualSet:
             #    print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
