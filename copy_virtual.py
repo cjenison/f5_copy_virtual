@@ -4,6 +4,7 @@
 # Author: Chad Jenison (c.jenison at f5.com)
 # Version 1.0
 # Version 1.1 - Significant paring down due to expandSubcollections usage; added support for IP change of virtual as it is copied
+# Version 2.0 - Major changes to support offline operation, using JSON file as storage
 #
 # Script that attempts to move a virtual (and all supporting configuration) from one BIG-IP to another
 # Medium Term To-Do: Try to Handle Missing Cert/Keys by copying with scp
@@ -18,24 +19,30 @@ import requests
 import json
 import getpass
 import paramiko
+from collections import OrderedDict
 
 
 filestorebasepath = '/config/filestore/files_d'
 
 #Setup command line arguments using Python argparse
 parser = argparse.ArgumentParser(description='A tool to move a BIG-IP LTM Virtual Server from one BIG-IP to another', epilog="Note that this utility only validates that destination object [e.g. a pool] exists or not on target system; if target object is found, it doesn't modify it")
-parser.add_argument('--sourcebigip', '-s', help='IP or hostname of Source BIG-IP Management or Self IP', required=True)
-parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destination BIG-IP Management or Self IP', required=True)
+parser.add_argument('--sourcebigip', '-s', help='IP or hostname of Source BIG-IP Management or Self IP')
+parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destination BIG-IP Management or Self IP')
 parser.add_argument('--user', '-u', help='username to use for authentication', required=True)
 virtual = parser.add_mutually_exclusive_group()
-virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual Server(s) to attach to (with full path [e.g. /Common/test])')
-virtual.add_argument('--allvirtuals', '-a', help="Copy all virtuals to target system that aren't already found")
+virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual server(s) on source to select (example: vs-1 or /Public/vs-1)')
+virtual.add_argument('--allvirtuals', '-a', help="Select all virtual servers on source system", action='store_true')
+mode = parser.add_mutually_exclusive_group()
+mode.add_argument('--copy', '-c', help='Copy from source to destination BIG-IP (online for both systems)', action='store_true')
+mode.add_argument('--write', '-w', help='Write JSON File Output (provide filename)')
+mode.add_argument('--read', '-r', help='Read JSON File Output and push to Destination BIG-IP (provide filename)')
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
 parser.add_argument('--destsuffix', help='Use a suffix for configuration objects on destination [do not re-use existing objects already on destination]')
-parser.add_argument('--offlinewrite', help='Store Configuration JSON to a file (provide filename)')
-parser.add_argument('--offlineread', help='Read Configuration JSON from a file (provide filename)')
-parser.add_argument('--disableonsource', '-disable', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination')
+parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
+parser.add_argument('--disableondestination', '-dd', help='Disable Virtual Server on Destination BIG-IP as it is copied', action='store_true')
+parser.add_argument('--nocertandkey', '-nck', help='Do not retrieve or push certs/keys and instead alter reference to default.crt and default.key')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination')
+#parser.add_argument('--file', '-f', help='Filename to read or write to')
 parser.add_argument('--noprompt', '-n', help='Do not prompt for confirmation of copying operations', action='store_true')
 
 args = parser.parse_args()
@@ -75,16 +82,24 @@ def get_auth_token(bigip, username, passwd):
     token = bip.post(authurl, headers=contentTypeJsonHeader, auth=(args.user, passwd), data=json.dumps(payload)).json()['token']['token']
     return token
 
-def get_active_software_version(bigip, authHeader):
+def get_system_info(bigip, authHeader):
+    systemInfo = dict()
     bip = requests.session()
     bip.verify = False
     bip.headers.update(authHeader)
+    globalSettings = bip.get('https://%s/mgmt/tm/sys/global-settings/' % (bigip)).json()
+    hardware = bip.get('https://%s/mgmt/tm/sys/hardware' % (bigip)).json()
+    systemInfo['baseMac'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['baseMac']['description']
+    systemInfo['marketingName'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['marketingName']['description']
     volumes = bip.get('https://%s/mgmt/tm/sys/software/volume' % (bigip)).json()
     for volume in volumes['items']:
         if volume.get('active'):
             if volume['active'] == True:
                 activeVersion = volume['version']
-    return activeVersion
+    systemInfo['version'] = activeVersion
+    systemInfo['hostname'] = globalSettings['hostname']
+    print ('systemInfo: %s' % (json.dumps(systemInfo, indent=4)))
+    return systemInfo
 
 def get_passphrase(profileFullPath):
     confirmedMatch = False
@@ -97,20 +112,13 @@ def get_passphrase(profileFullPath):
             print ('Passphrases did not match, please re-enter.')
     return passphrase1
 
-def copy_cert_and_key(certFullPath, keyFullPath):
+def get_cert_and_key(certFullPath, keyFullPath):
     print('Cert FullPath: %s' % (certFullPath))
     print('Key FullPath: %s' % (keyFullPath))
     sourcessh = paramiko.SSHClient()
-    destinationssh = paramiko.SSHClient()
     sourcessh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     sourcessh.connect(args.sourcebigip, username=args.user, password=passwd, allow_agent=False)
-    destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
     sourcesftp = sourcessh.open_sftp()
-    destinationsftp = destinationssh.open_sftp()
-    destinationsftp.chdir('/tmp/')
-    destinationsftp.mkdir('_copy_virtual')
-    destinationsftp.chdir('_copy_virtual')
     certFolder = certFullPath.split("/")[1]
     keyFolder = keyFullPath.split("/")[1]
     filestore_basepath = '/config/filestore/files_d/%s_d' % (certFolder)
@@ -135,100 +143,177 @@ def copy_cert_and_key(certFullPath, keyFullPath):
     keyFile = keyFileRead.read()
     print('keyFile: %s' % (keyFile))
     keyFileRead.close()
-    certFileWrite = destinationsftp.open(certFullPath.replace("/", ":", 2), 'w')
-    certFileWrite.write(certFile)
-    certFileWrite.close()
-    keyFileWrite = destinationsftp.open(keyFullPath.replace("/", ":", 2), 'w')
-    keyFileWrite.write(keyFile)
-    keyFileWrite.close()
-    cryptoPostPayload = {}
-    cryptoPostPayload['command']='install'
-    cryptoPostPayload['name']=certFullPath
-    cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (certFullPath.replace("/", ":", 2))
-    certPost = destinationbip.post('%s/sys/crypto/cert' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
-    if certPost.status_code == 200:
-        print('Successfully Posted Cert: %s to destination BIG-IP' % (certFullPath))
-    else:
-        print('Unsuccessful attempt to post cert: %s to destination with JSON: %s' % (certFullPath, cryptoPostPayload))
-        print('Body: %s' % (certPost.content))
-    cryptoPostPayload['name']=keyFullPath
-    cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (keyFullPath.replace("/", ":", 2))
-    keyPost = destinationbip.post('%s/sys/crypto/key' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
-    if keyPost.status_code == 200:
-        print('Successfully Posted Key: %s to destination BIG-IP' % (keyFullPath))
-    else:
-        print('Unsuccessful attempt to post key: %s to destination with JSON: %s' % (keyFullPath, cryptoPostPayload))
-        print('Body: %s' % (keyPost.content))
-    destinationsftp.remove(certFullPath.replace("/", ":", 2))
-    destinationsftp.remove(keyFullPath.replace("/", ":", 2))
-    destinationsftp.rmdir('/tmp/_copy_virtual')
+    certWithKey = {'cert': {'fullPath': certFullPath, 'certText': certFile}, 'key': {'fullPath': keyFullPath, 'keyText': keyFile}}
+    return certWithKey
 
-def copy_virtual(virtualFullPath):
-    virtualJson = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
-    del virtualJson['selfLink']
-    if virtualJson.get('pool'):
-        if virtualJson['pool'] not in destinationPoolSet:
-            copy_pool(virtualJson['pool'])
-        else:
-            print('Pool: %s - Already on destination and left in place' % (virtualJson['pool']))
-    if virtualJson.get('sourceAddressTranslation').get('pool'):
-        if virtualJson['sourceAddressTranslation']['pool'] not in destinationSnatpoolSet:
-            copy_snatpool(virtualJson['sourceAddressTranslation']['pool'])
-        else:
-            print('Snatpool: %s - Already on destination' % (virtualJson['sourceAddressTranslation']['pool']))
-    virtualPolicies = virtualJson['policiesReference']
+def put_cert(fullPath, certText):
+    destinationssh = paramiko.SSHClient()
+    destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
+    destinationsftp = destinationssh.open_sftp()
+    destinationsftp.chdir('/tmp/')
+    destinationsftp.mkdir('_copy_virtual')
+    destinationsftp.chdir('_copy_virtual')
+    certFileWrite = destinationsftp.open(fullPath.replace("/", ":", 2), 'w')
+    certFileWrite.write(certText)
+    certFileWrite.close()
+    certPostPayload = {}
+    certPostPayload['command']='install'
+    certPostPayload['name']=fullPath
+    certPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":", 2))
+    certPost = destinationbip.post('%s/sys/crypto/cert' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(certPostPayload))
+    if certPost.status_code == 200:
+        print('Successfully Posted Cert: %s to destination BIG-IP' % (fullPath))
+        destinationCertSet.add(fullPath)
+    else:
+        print('Unsuccessful attempt to post cert: %s to destination with JSON: %s' % (fullPath, certPostPayload))
+        print('Body: %s' % (certPost.content))
+    destinationsftp.remove(fullPath.replace("/", ":", 2))
+    destinationsftp.rmdir('/tmp/_copy_virtual')
+    destinationsftp.close()
+
+def put_key(fullPath, keyText):
+    destinationssh = paramiko.SSHClient()
+    destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
+    destinationsftp = destinationssh.open_sftp()
+    destinationsftp.chdir('/tmp/')
+    destinationsftp.mkdir('_copy_virtual')
+    destinationsftp.chdir('_copy_virtual')
+    keyFileWrite = destinationsftp.open(fullPath.replace("/", ":", 2), 'w')
+    keyFileWrite.write(keyText)
+    keyFileWrite.close()
+    keyPostPayload = {}
+    keyPostPayload['command']='install'
+    keyPostPayload['name']=fullPath
+    keyPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":", 2))
+    keyPost = destinationbip.post('%s/sys/crypto/key' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(keyPostPayload))
+    if keyPost.status_code == 200:
+        print('Successfully Posted Key: %s to destination BIG-IP' % (fullPath))
+        destinationKeySet.add(fullPath)
+    else:
+        print('Unsuccessful attempt to post key: %s to destination with JSON: %s' % (fullPath, keyPostPayload))
+        print('Body: %s' % (keyPost.content))
+    destinationsftp.remove(fullPath.replace("/", ":", 2))
+    destinationsftp.rmdir('/tmp/_copy_virtual')
+    destinationsftp.close()
+
+def get_virtual(virtualFullPath):
+    virtualDict = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
+    if virtualDict.get('pool'):
+        virtualConfig.append(get_pool(virtualDict['pool']))
+    if virtualDict.get('sourceAddressTranslation').get('pool'):
+        virtualConfig.append(get_snatpool(virtualDict['sourceAddressTranslation']['pool']))
+    virtualPolicies = virtualDict['policiesReference']
     if virtualPolicies.get('items'):
         for policy in virtualPolicies['items']:
-            if policy['fullPath'] not in destinationPolicySet:
-                copy_policy(policy['fullPath'])
-            else:
-                print('Policy: %s - already on destination and left in place' % (policy['fullPath']))
+            virtualConfig.append(get_policy(policy['fullPath']))
     #virtualProfiles = sourcebip.get('%s/ltm/virtual/%s/profiles' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
-    virtualProfiles = virtualJson['profilesReference']
+    virtualProfiles = virtualDict['profilesReference']
     if virtualProfiles.get('items'):
         for profile in virtualProfiles['items']:
             print('Profile: %s' % (profile['fullPath']))
-            if profile['fullPath'] not in destinationProfileSet:
-                print('Missing Profile on Destination: %s' % (profile['fullPath']))
-                copy_profile(profile['fullPath'])
-            else:
-                print('Profile: %s - already on destination and left in place' % (profile['fullPath']))
-    if virtualJson.get('persist'):
+            virtualConfig.append(get_profile(profile['fullPath']))
+    if virtualDict.get('persist'):
         hasPrimaryPersistence = True
-        primaryPersistence = virtualJson['persist']
-        primaryPersistenceFullPath = '/%s/%s' % (virtualJson['persist'][0]['partition'], virtualJson['persist'][0]['name'])
-        if primaryPersistenceFullPath not in destinationPersistenceSet:
-            print('Primary Persistence Profile: %s missing on destination' % (primaryPersistenceFullPath))
-            copy_persistence(primaryPersistenceFullPath)
-        else:
-            print('Primary Persistence Profile: %s already on destination' % (primaryPersistenceFullPath))
-    if virtualJson.get('fallbackPersistence'):
-        if virtualJson['fallbackPersistence'] not in destinationPersistenceSet:
-            print('Fallback Persistence Profile: %s missing on destination' % (virtualJson['fallbackPersistence']))
-            copy_persistence(virtualJson['fallbackPersistence'])
-        else:
-            print('Fallback Persistence Profile: %s already on destination' % (virtualJson['fallbackPersistence']))
-    if virtualJson.get('rules'):
-        for rule in virtualJson['rules']:
-            if rule not in destinationRuleSet:
-                print ('Rule: %s missing on destination' % (rule))
-                copy_rule(rule)
-            else:
-                print('Rule: %s - already on destination and left in place' % (rule))
+        primaryPersistence = virtualDict['persist']
+        primaryPersistenceFullPath = '/%s/%s' % (virtualDict['persist'][0]['partition'], virtualDict['persist'][0]['name'])
+        virtualConfig.append(get_persistence(primaryPersistenceFullPath))
+    if virtualDict.get('fallbackPersistence'):
+        virtualConfig.append(get_persistence(virtualDict['fallbackPersistence']))
+    if virtualDict.get('rules'):
+        for rule in virtualDict['rules']:
+            virtualConfig.append(get_rule(rule))
     if args.ipchange:
-        #### IPv6 Problem in the Split(":") usage
-        changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (virtualJson['destination'].split("/")[2].rsplit(":", 1)[0], virtualJson['destination'].split("/")[2].rsplit(":", 1)[1], virtualJson['mask'])
+        changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (virtualDict['destination'].split("/")[2].rsplit(":", 1)[0], virtualDict['destination'].split("/")[2].rsplit(":", 1)[1], virtualDict['mask'])
         if query_yes_no(changeDestination, default="yes"):
-            newDestination = obtain_new_vs_destination(virtualJson['destination'].split("/")[2].rsplit(":", 1)[0], virtualJson['destination'].split("/")[2].rsplit(":", 1)[1], virtualJson['mask'])
-            destinationPartition = virtualJson['destination'].split("/")[1]
-            virtualJson['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
-            virtualJson['mask'] = newDestination['mask']
-    copiedVirtual = destinationbip.post('%s/ltm/virtual/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(virtualJson))
-    if copiedVirtual.status_code == 200:
-        print('Successfully Copied Virtual: %s' % (virtualFullPath))
-    else:
-        print('Unsuccessful attempt to copy virtual: %s ; StatusCode: %s' % (virtualFullPath, copiedVirtual.status_code))
-        print('Body: %s' % (copiedVirtual.content))
+            newDestination = obtain_new_vs_destination(virtualDict['destination'].split("/")[2].rsplit(":", 1)[0], virtualDict['destination'].split("/")[2].rsplit(":", 1)[1], virtualDict['mask'])
+            destinationPartition = virtualDict['destination'].split("/")[1]
+            virtualDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
+            virtualDict['mask'] = newDestination['mask']
+    virtualConfig.append(virtualDict)
+    return virtualConfig
+    #copiedVirtual = destinationbip.post('%s/ltm/virtual/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(virtualDict))
+    #if copiedVirtual.status_code == 200:
+    #    print('Successfully Copied Virtual: %s' % (virtualFullPath))
+    #else:
+    #    print('Unsuccessful attempt to copy virtual: %s ; StatusCode: %s' % (virtualFullPath, copiedVirtual.status_code))
+    #    print('Body: %s' % (copiedVirtual.content))
+
+def put_virtual(virtualFullPath, virtualConfigArray):
+    print('**Processing Virtual: %s to BIG-IP: %s' % (virtualFullPath, args.destinationbigip))
+    for configObject in virtualConfigArray:
+        put_json(configObject['fullPath'], configObject)
+
+def put_json(fullPath, configDict):
+    #print('fullPath Argument: %s' % (fullPath))
+    #print('fullPath fromDict: %s' % (configDict['fullPath']))
+    #print('kind: %s' % (configDict['kind']))
+    objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
+    postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
+    print ('objectUrl: %s' % (objectUrl))
+    #print ('postUrl: %s' % (postUrl))
+    destinationObjectGet = destinationbip.get(objectUrl)
+    if destinationObjectGet.status_code == 200:
+        print('config object: %s already on destination; leaving in place' % (fullPath))
+    elif destinationObjectGet.status_code == 404:
+        if configDict['kind'] == 'tm:ltm:virtual:virtualstate':
+            if args.ipchange:
+                changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
+                if query_yes_no(changeDestination, default="yes"):
+                    newDestination = obtain_new_vs_destination(configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
+                    destinationPartition = configDict['destination'].split("/")[1]
+                    configDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
+                    configDict['mask'] = newDestination['mask']
+                    print ('New Destination: %s - port: %s mask: %s' % (newDestination['ip'], newDestination['port'], newDestination['mask']))
+            if args.disableondestination:
+                if configDict.get('enabled'):
+                    del configDict['enabled']
+                configDict['disabled'] = True
+            ### Observed problems posting this to Old BIG-IP
+            if configDict.get('serviceDownImmediateAction'):
+                del configDict['serviceDownImmediateAction']
+            if configDict.get('rulesReference'):
+                del configDict['rulesReference']
+        elif configDict['kind'] == 'tm:ltm:pool:poolstate':
+            for member in configDict['membersReference']['items']:
+                del member['state']
+                del member['ephemeral']
+        elif configDict['kind'] == 'tm:ltm:snatpool:snatpoolstate':
+            if configDict.get('membersReference'):
+                del configDict['membersReference']
+        elif configDict['kind'] == 'tm:ltm:policy:policystate':
+            print('Deal with Policies specially based on destination version')
+        elif configDict['kind'] == 'tm:sys:crypto:cert:certstate':
+            if fullPath not in destinationCertSet and not args.nocertandkey:
+                if configDict.get('certText'):
+                    put_cert(configDict['fullPath'], configDict['certText'])
+        elif configDict['kind'] == 'tm:sys:crypto:key:keystate':
+            if fullPath not in destinationKeySet and not args.nocertandkey:
+                if configDict.get('keyText'):
+                    put_key(configDict['fullPath'], configDict['keyText'])
+        elif configDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
+            ### FIX BELOW TO Handle CertkeyChain properly
+            if configDict.get('certKeyChain'):
+                del configDict['certKeyChain']
+            if configDict['cert'] not in destinationCertSet or configDict['key'] not in destinationKeySet:
+                print('cert: %s and/or key: %s missing on destination - altering cert/key references to default.crt/default.key')
+                configDict['cert'] = '/Common/default.crt'
+                configDict['key'] = '/Common/default.crt'
+            else:
+                if configDict.get('passphrase'):
+                    print('Source client-ssl profile: %s contains encrypted passphrase; need to re-obtain passphrase')
+                    print('**Note: passphrases are encrypted on BIG-IP using Secure Vault technology')
+                    print('**Note: passphrase will be submitted via iControl REST, but will be immediately encrypted on BIG-IP')
+                    configDict['passphrase'] = get_passphrase(configDict['fullPath'])
+        print ('Posting to: %s' % (postUrl))
+        destinationObjectPost = destinationbip.post(postUrl, headers=destinationPostHeaders, data=json.dumps(configDict))
+        if destinationObjectPost.status_code == 200:
+            print ('Successfully Posted Object: %s to URL: %s' % (fullPath, postUrl))
+        else:
+            print ('Unsuccessful Post of Object: %s to URL: %s' % (fullPath, postUrl))
+            print ('Payload: %s' % (json.dumps(configDict)))
+            print ('Status Code: %s - Body: %s' % (destinationObjectPost.status_code, destinationObjectPost.content))
 
 def obtain_new_vs_destination(destination, port, mask):
     changeDestination = 'Destination: %s - Change?' % (destination)
@@ -264,342 +349,234 @@ def obtain_new_vs_destination(destination, port, mask):
     destination = {'ip': newDestination, 'port':newPort, 'mask':newMask}
     return destination
 
-def copy_profile(profileFullPath):
-    profileJson = sourcebip.get('%s/ltm/profile/%s/%s' % (sourceurl_base, sourceProfileTypeDict[profileFullPath], profileFullPath.replace("/", "~", 2))).json()
+def get_cert(certFullPath):
+    certDict = sourcebip.get('%s/sys/crypto/cert/%s' % (sourceurl_base, certFullPath.replace("/", "~", 2))).json()
+    return certDict
+
+def get_key(keyFullPath):
+    keyDict = sourcebip.get('%s/sys/crypto/key/%s' % (sourceurl_base, keyFullPath.replace("/", "~", 2))).json()
+    return keyDict
+
+def get_profile(profileFullPath):
+    profileDict = sourcebip.get('%s/ltm/profile/%s/%s' % (sourceurl_base, sourceProfileTypeDict[profileFullPath], profileFullPath.replace("/", "~", 2))).json()
     if sourceProfileTypeDict[profileFullPath] == 'client-ssl':
         print('Profile: %s is client-ssl' % (profileFullPath))
-        if profileJson['cert'] not in destinationCertSet or profileJson['key'] not in destinationKeySet:
-            copy_cert_and_key(profileJson['cert'], profileJson['key'])
-        if profileJson.get('passphrase'):
-            print('Profile: %s uses a key with passphrase protection' % (profileFullPath))
-            del profileJson['passphrase']
-            del profileJson['certKeyChain']
-            passphrase = get_passphrase(profileJson['fullPath'])
-            profileJson['passphrase'] = passphrase
+        if not args.nocertandkey:
+            cert = get_cert(profileDict['cert'])
+            key = get_key(profileDict['key'])
+            certAndKey = get_cert_and_key(profileDict['cert'], profileDict['key'])
+            cert['certText']=certAndKey['cert']['certText']
+            key['keyText']=certAndKey['key']['keyText']
+            virtualConfig.append(cert)
+            virtualConfig.append(key)
         else:
-            print('Profile: %s does not use passphrase protection' % (profileFullPath))
-    del profileJson['selfLink']
-    copiedProfile = destinationbip.post('%s/ltm/profile/%s' % (destinationurl_base, sourceProfileTypeDict[profileFullPath]), headers=destinationPostHeaders, data=json.dumps(profileJson))
-    if copiedProfile.status_code == 200:
-        print ('Successfully Copied %s Profile: %s' % (sourceProfileTypeDict[profileFullPath], profileFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy %s profile: %s ; StatusCode: %s' % (sourceProfileTypeDict[profileFullPath], profileFullPath, copiedProfile.status_code))
-        print ('Body: %s' % (copiedProfile.content))
+            print('May need to adjust profile reference to default.crt and default.key')
+            #alter references in profile to default.crt and default.key
+    return profileDict
 
-def copy_rule(ruleFullPath):
-    ruleJson = sourcebip.get('%s/ltm/rule/%s' % (sourceurl_base, ruleFullPath.replace("/", "~", 2))).json()
-    #if ruleJson.get('selfLink'):
-    del ruleJson['selfLink']
-    copiedRule = destinationbip.post('%s/ltm/rule' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(ruleJson))
-    if copiedRule.status_code == 200:
-        print ('Successfully Copied Rule: %s' % (ruleFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy rule: %s ; StatusCode: %s' % (ruleFullPath, copiedRule.status_code))
-        print ('Body: %s' % (copiedRule.content))
+def get_rule(ruleFullPath):
+    ruleDict = sourcebip.get('%s/ltm/rule/%s' % (sourceurl_base, ruleFullPath.replace("/", "~", 2))).json()
+    return ruleDict
 
-def copy_persistence(persistenceFullPath):
-    persistenceJson = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))).json()
-    del persistenceJson['selfLink']
-    copiedPersistence = destinationbip.post('%s/ltm/persistence/%s' % (destinationurl_base, sourcePersistenceTypeDict[persistenceFullPath]), headers=destinationPostHeaders, data=json.dumps(persistenceJson))
-    if copiedPersistence.status_code == 200:
-        print ('Successfully Copied Persistence Profile: %s' % (persistenceFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy persistence profile: %s ; StatusCode: %s' % (persistenceFullPath, copiedPersistence.status_code))
-        print ('Body: %s' % (copiedPersistence.content))
+def get_persistence(persistenceFullPath):
+    persistenceDict = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))).json()
+    return persistenceDict
 
-def copy_monitor(monitorFullPath):
-    monitorJson = sourcebip.get('%s/ltm/monitor/%s/%s' % (sourceurl_base, sourceMonitorTypeDict[monitorFullPath], monitorFullPath.replace("/", "~", 2))).json()
-    del monitorJson['selfLink']
-    copiedMonitor = destinationbip.post('%s/ltm/monitor/%s' % (destinationurl_base, sourceMonitorTypeDict[monitorFullPath]), headers=destinationPostHeaders, data=json.dumps(monitorJson))
-    if copiedMonitor.status_code == 200:
-        print ('Successfully Copied Monitor: %s' % (monitorFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy monitor: %s ; StatusCode: %s' % (monitorFullPath, copiedMonitor.status_code))
-        print ('Body: %s' % (copiedMonitor.content))
+def get_monitor(monitorFullPath):
+    monitorDict = sourcebip.get('%s/ltm/monitor/%s/%s' % (sourceurl_base, sourceMonitorTypeDict[monitorFullPath], monitorFullPath.replace("/", "~", 2))).json()
+    return monitorDict
 
-def copy_snatpool(snatpoolFullPath):
-    snatpoolJson = sourcebip.get('%s/ltm/snatpool/%s' % (sourceurl_base, snatpoolFullPath.replace("/", "~", 2))).json()
-    del snatpoolJson['selfLink']
-    copiedSnatpool = destinationbip.post('%s/ltm/snatpool/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(snatpoolJson))
-    if copiedSnatpool.status_code == 200:
-        print ('Successfully Copied Snatpool: %s' % (snatpoolFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy snatpool: %s ; StatusCode: %s' % (snatpoolFullPath, copiedSnatpool.status_code))
-        print ('Body: %s' % (copiedSnatpool.content))
+def get_snatpool(snatpoolFullPath):
+    snatpoolDict = sourcebip.get('%s/ltm/snatpool/%s' % (sourceurl_base, snatpoolFullPath.replace("/", "~", 2))).json()
+    return snatpoolDict
 
-def copy_pool(poolFullPath):
-    poolJson = sourcebip.get('%s/ltm/pool/%s' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
-    del poolJson['selfLink']
-    if poolJson.get('monitor'):
-        for monitor in poolJson['monitor'].strip().split(" and "):
-            if monitor not in destinationMonitorSet:
-                copy_monitor(monitor)
-    copiedPool = destinationbip.post('%s/ltm/pool/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(poolJson))
-    if copiedPool.status_code == 200:
-        print ('Successfully Copied Pool: %s' % (poolFullPath))
-        # Now copy members
-        membersJson = sourcebip.get('%s/ltm/pool/%s/members' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
-        for member in membersJson['items']:
-            del member['state']
-            del member['selfLink']
-            del member['session']
+def get_pool(poolFullPath):
+    poolDict = sourcebip.get('%s/ltm/pool/%s?expandSubcollections=true' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
+    if poolDict.get('monitor'):
+        for monitor in poolDict['monitor'].strip().split(' and '):
+            virtualConfig.append(get_monitor(monitor))
+        for member in poolDict['membersReference']['items']:
             if member['monitor'] != 'default':
-                print('Member: %s has monitor: %s' % (member['name'], member['monitor']))
-		for monitor in member['monitor'].strip().split(" and "):
-                    if monitor not in destinationMonitorSet:
-                        copy_monitor(monitor)
-                        generate_destination_sets()
-            else:
-                print('Member: %s has default monitor' % (member['name']))
-            copiedMember = destinationbip.post('%s/ltm/pool/%s/members/' % (destinationurl_base, poolFullPath.replace("/", "~", 2)), data=json.dumps(member))
-            if copiedMember.status_code == 200:
-                print ('Successfully Copied Member: %s for Pool: %s' % (member['name'], poolFullPath))
-            else:
-                print ('Unsuccessful attempt to copy member for pool: %s ; StatusCode: %s' % (poolFullPath, copiedMember.status_code))
-                print ('Body: %s' % (copiedMember.content))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy pool: %s ; StatusCode: %s' % (poolFullPath, copiedPool.status_code))
-        print ('Body: %s' % (copiedPool.content))
+                for monitor in member['monitor'].strip().split(' and '):
+                    virtualConfig.append(get_monitor(monitor))
+    return poolDict
 
-def copy_policy(policyFullPath):
-    policyJson = sourcebip.get('%s/ltm/policy/%s' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
-    del policyJson['selfLink']
-    del policyJson['fullPath']
-    del policyJson['rulesReference']
+def get_policy(policyFullPath):
+    policyDict = sourcebip.get('%s/ltm/policy/%s?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
+    #del policyDict['fullPath']
     ### with 12.1.x+; policies now have "Drafts" or "Published" status (https://support.f5.com/csp/article/K33749970)
     ### need to add code to handle this stuff
-    del policyJson['status']
-    policyJson['subPath']='Drafts'
-    if policyJson['strategy'] not in destinationPolicyStrategySet:
-        copy_policy_strategy(policyJson['strategy'])
-    copiedPolicy = destinationbip.post('%s/ltm/policy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(policyJson))
-    if copiedPolicy.status_code == 200:
-        print ('Successfully Copied Policy: %s' % (policyFullPath))
-    else:
-        print ('Unsuccessful attempt to copy policy: %s ; StatusCode: %s' % (policyFullPath, copiedPolicy.status_code))
-        print ('Body: %s' % (copiedPolicy.content))
-    rulesJson = sourcebip.get('%s/ltm/policy/%s/rules?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
-    draftFullPath = '/%s/Drafts/%s' % (policyFullPath.split("/")[1], policyFullPath.split("/")[2])
-    print ('draftFullPath: %s' % (draftFullPath))
-    if rulesJson.get('items'):
-        for rule in rulesJson['items']:
-            print('rule: %s' % (rule['name']))
-            copiedRule = destinationbip.post('%s/ltm/policy/%s/rules/' % (destinationurl_base, draftFullPath.replace("/", "~", 3)), headers=destinationPostHeaders, data=json.dumps(rule))
-            if copiedRule.status_code == 200:
-                print('Successfully Copied Rule: %s' % (rule['fullPath']))
-            else:
-                print ('Unsuccessful attempt to copy rule: %s ; StatusCode: %s' % (rule['name'], copiedRule.status_code))
-                print ('Body: %s' % (copiedRule.content))
-    publishCommand = {'command': "publish", 'name': draftFullPath }
-    destinationbip.post('%s/ltm/policy' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(publishCommand))
-    print ('Finished copying Policy: %s' % (policyFullPath))
-    generate_destination_sets()
+    if policyDict.get('status'):
+        print('Our source machine is likely 12.1.x or later')
+    if policyDict.get('controls'):
+        print('Our Source machine may be pre-12.1')
+    #policyDict.getpolicyDict['subPath']='Drafts'
+    #to get policies published on 12.1 or later, gotta put a a subPath of Drafts in
+    virtualDict.append(get_policy_strategy(policyDict['strategy']))
+    #copiedPolicy = destinationbip.post('%s/ltm/policy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(policyJson))
+    rulesDict = policyDict['rulesReference']
+    #draftFullPath = '/%s/Drafts/%s' % (policyFullPath.split("/")[1], policyFullPath.split("/")[2])
+    #print ('draftFullPath: %s' % (draftFullPath))
+    #publishCommand = {'command': "publish", 'name': draftFullPath }
+    #destinationbip.post('%s/ltm/policy' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(publishCommand))
+    print ('Finished getting Policy: %s' % (policyFullPath))
+    return policyDict
 
-def copy_policy_strategy(policyStrategyFullPath):
-    policyStrategyJson = sourcebip.get('%s/ltm/policy-strategy/%s' % (sourceurl_base, policyStrategyFullPath.replace("/", "~", 2))).json()
-    del policyStrategyJson['selfLink']
-    copiedPolicyStrategy = destinationbip.post('%s/ltm/policy-strategy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(policyStrategyJson))
-    if copiedPolicyStrategy.status_code == 200:
-        print ('Successfully Copied Policy-Strategy: %s' % (policyStrategyFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy policy strategy: %s ; StatusCode: %s' % (policyStrategyFullPath, copiedPolicyStrategy.status_code))
-        print ('Body: %s' % (copiedPolicyStrategy.content))
+def get_policy_strategy(policyStrategyFullPath):
+    policyStrategyDict = sourcebip.get('%s/ltm/policy-strategy/%s' % (sourceurl_base, policyStrategyFullPath.replace("/", "~", 2))).json()
+    return policyStrategyDict
 
-def generate_destination_sets():
-    destinationProfileTypes = destinationbip.get('%s/ltm/profile/' % (destinationurl_base)).json()
-    for profileType in destinationProfileTypes['items']:
-        typeString = profileType['reference']['link'].split("/")[-1].split("?")[0]
-        profileTypeCollection = destinationbip.get('%s/ltm/profile/%s' % (destinationurl_base, typeString)).json()
-        if profileTypeCollection.get('items'):
-            for profile in profileTypeCollection['items']:
-                destinationProfileSet.add(profile['fullPath'])
+user = args.user
+passwd = getpass.getpass("Password for " + user + ":")
+requests.packages.urllib3.disable_warnings()
 
-    destinationPools = destinationbip.get('%s/ltm/pool/' % (destinationurl_base)).json()
-    if destinationPools.get('items'):
-        for pool in destinationPools['items']:
-            destinationPoolSet.add(pool['fullPath'])
-
-    destinationMonitorTypes = destinationbip.get('%s/ltm/monitor/' % (destinationurl_base)).json()
-    for monitorType in destinationMonitorTypes['items']:
-        typeString = monitorType['reference']['link'].split("/")[-1].split("?")[0]
-        monitorTypeCollection = destinationbip.get('%s/ltm/monitor/%s' % (destinationurl_base, typeString)).json()
-        if monitorTypeCollection.get('items'):
-            for monitor in monitorTypeCollection['items']:
-                destinationMonitorSet.add(monitor['fullPath'])
-
-    destinationNodes = destinationbip.get('%s/ltm/node/' % (destinationurl_base)).json()
-    if destinationNodes.get('items'):
-        for node in destinationNodes['items']:
-            destinationNodeSet.add(node['fullPath'])
-
+if args.destinationbigip and (args.copy or args.read):
+    destinationurl_base = ('https://%s/mgmt/tm' % (args.destinationbigip))
+    destinationbip = requests.session()
+    destinationbip.verify = False
+    destinationAuthToken = get_auth_token(args.destinationbigip, args.user, passwd)
+    destinationAuthHeader = {'X-F5-Auth-Token': destinationAuthToken}
+    destinationbip.headers.update(destinationAuthHeader)
+    destinationSystemInfo = get_system_info(args.destinationbigip, destinationAuthHeader)
+    destinationVersion = destinationSystemInfo['version']
+    print('Destination BIG-IP Version: %s' % (destinationVersion))
+    destinationPostHeaders = destinationAuthHeader
+    destinationPostHeaders.update(contentTypeJsonHeader)
+    destinationCertSet = set()
+    destinationKeySet = set()
+    destinationVirtualSet = set()
+    destinationVirtuals = destinationbip.get('%s/ltm/virtual/' % (destinationurl_base)).json()
+    if destinationVirtuals.get('items'):
+        for virtual in destinationVirtuals['items']:
+            destinationVirtualSet.add(virtual['fullPath'])
     destinationCerts = destinationbip.get('%s/sys/crypto/cert/' % (destinationurl_base)).json()
     for cert in destinationCerts['items']:
         destinationCertSet.add(cert['fullPath'])
-
     destinationKeys = destinationbip.get('%s/sys/crypto/key/' % (destinationurl_base)).json()
     for key in destinationKeys['items']:
         destinationKeySet.add(key['fullPath'])
 
-    destinationRules = destinationbip.get('%s/ltm/rule/' % (destinationurl_base)).json()
-    for rule in destinationRules['items']:
-        destinationRuleSet.add(rule['fullPath'])
+if args.sourcebigip and (args.copy or args.write):
+    sourceurl_base = ('https://%s/mgmt/tm' % (args.sourcebigip))
+    sourcebip = requests.session()
+    sourcebip.verify = False
+    sourceAuthToken = get_auth_token(args.sourcebigip, args.user, passwd)
+    sourceAuthHeader = {'X-F5-Auth-Token': sourceAuthToken}
+    sourcebip.headers.update(sourceAuthHeader)
+    sourceSystemInfo = get_system_info(args.sourcebigip, sourceAuthHeader)
+    sourceVersion = sourceSystemInfo['version']
+    print('Source BIG-IP Version: %s' % (sourceVersion))
+    sourcePostHeaders = sourceAuthHeader
+    sourcePostHeaders.update(contentTypeJsonHeader)
 
-    destinationInternalDatagroups = destinationbip.get('%s/ltm/data-group/internal/' % (destinationurl_base)).json()
-    if destinationInternalDatagroups.get('items'):
-        for datagroup in destinationInternalDatagroups['items']:
-            destinationDatagroupSet.add(datagroup['fullPath'])
+    sourceProfileTypeDict = dict()
+    sourceProfiles = sourcebip.get('%s/ltm/profile/' % (sourceurl_base)).json()
+    for profile in sourceProfiles['items']:
+        typeUrlFragment = profile['reference']['link'].split("/")[-1].split("?")[0]
+        profileTypeCollection = sourcebip.get('%s/ltm/profile/%s' % (sourceurl_base, typeUrlFragment)).json()
+        if profileTypeCollection.get('items'):
+            for profile in profileTypeCollection['items']:
+                sourceProfileTypeDict[profile['fullPath']] = typeUrlFragment
 
-    destinationExternalDatagroups = destinationbip.get('%s/ltm/data-group/external/' % (destinationurl_base)).json()
-    if destinationExternalDatagroups.get('items'):
-        for datagroup in destinationExternalDatagroups['items']:
-            destinationDatagroupSet.add(datagroup['fullPath'])
+    sourcePersistenceTypeDict = dict()
+    sourcePersistenceProfiles = sourcebip.get('%s/ltm/persistence/' % (sourceurl_base)).json()
+    for persistenceProfile in sourcePersistenceProfiles['items']:
+        typeUrlFragment = persistenceProfile['reference']['link'].split("/")[-1].split("?")[0]
+        persistenceProfileTypeCollection = sourcebip.get('%s/ltm/persistence/%s' % (sourceurl_base, typeUrlFragment)).json()
+        if persistenceProfileTypeCollection.get('items'):
+            for persistenceProfile in persistenceProfileTypeCollection['items']:
+                sourcePersistenceTypeDict[persistenceProfile['fullPath']] = typeUrlFragment
 
-    destinationSnatpools = destinationbip.get('%s/ltm/snatpool/' % (destinationurl_base)).json()
-    for snatpool in destinationSnatpools['items']:
-        destinationSnatpoolSet.add(snatpool['fullPath'])
+    sourceMonitorTypeDict = dict()
+    sourceMonitors = sourcebip.get('%s/ltm/monitor/' % (sourceurl_base)).json()
+    for monitor in sourceMonitors['items']:
+        typeUrlFragment = monitor['reference']['link'].split("/")[-1].split("?")[0]
+        monitorTypeCollection = sourcebip.get('%s/ltm/monitor/%s' % (sourceurl_base, typeUrlFragment)).json()
+        if monitorTypeCollection.get('items'):
+            for monitor in monitorTypeCollection['items']:
+                sourceMonitorTypeDict[monitor['fullPath']] = typeUrlFragment
 
-    destinationPolicies = destinationbip.get('%s/ltm/policy/' % (destinationurl_base)).json()
-    for policy in destinationPolicies['items']:
-        destinationPolicySet.add(policy['fullPath'])
+    sourceVirtualDict = dict()
+    sourceVirtualSet = set()
+    sourceVirtuals = sourcebip.get('%s/ltm/virtual/' % (sourceurl_base)).json()
+    if sourceVirtuals.get('items'):
+        for virtual in sourceVirtuals['items']:
+            sourceVirtualDict[virtual['name']] = virtual['fullPath']
+            sourceVirtualSet.add(virtual['fullPath'])
 
-    destinationPolicyStrategies = destinationbip.get('%s/ltm/policy-strategy/' % (destinationurl_base)).json()
-    for policyStrategy in destinationPolicyStrategies['items']:
-        destinationPolicyStrategySet.add(policyStrategy['fullPath'])
+    sourceDatagroupSet = set()
+    sourceInternalDatagroups = sourcebip.get('%s/ltm/data-group/internal/' % (sourceurl_base)).json()
+    if sourceInternalDatagroups.get('items'):
+        for datagroup in sourceInternalDatagroups['items']:
+            sourceDatagroupSet.add(datagroup['fullPath'])
 
-    destinationPersistenceTypes = destinationbip.get('%s/ltm/persistence/' % (destinationurl_base)).json()
-    for persistenceType in destinationPersistenceTypes['items']:
-        typeString = persistenceType['reference']['link'].split("/")[-1].split("?")[0]
-        persistenceTypeCollection = destinationbip.get('%s/ltm/persistence/%s' % (destinationurl_base, typeString)).json()
-        if persistenceTypeCollection.get('items'):
-            for persistenceProfile in persistenceTypeCollection['items']:
-                destinationPersistenceSet.add(persistenceProfile['fullPath'])
+    sourceExternalDatagroups = sourcebip.get('%s/ltm/data-group/external/' % (sourceurl_base)).json()
+    if sourceExternalDatagroups.get('items'):
+        for datagroup in sourceExternalDatagroups['items']:
+            sourceDatagroupSet.add(datagroup['fullPath'])
 
-sourceurl_base = ('https://%s/mgmt/tm' % (args.sourcebigip))
-destinationurl_base = ('https://%s/mgmt/tm' % (args.destinationbigip))
-user = args.user
-passwd = getpass.getpass("Password for " + user + ":")
-sourcebip = requests.session()
-sourcebip.verify = False
-destinationbip = requests.session()
-destinationbip.verify = False
-requests.packages.urllib3.disable_warnings()
-sourceAuthToken = get_auth_token(args.sourcebigip, args.user, passwd)
-sourceAuthHeader = {'X-F5-Auth-Token': sourceAuthToken}
-sourcebip.headers.update(sourceAuthHeader)
-destinationAuthToken = get_auth_token(args.destinationbigip, args.user, passwd)
-destinationAuthHeader = {'X-F5-Auth-Token': destinationAuthToken}
-destinationbip.headers.update(destinationAuthHeader)
-sourceVersion = get_active_software_version(args.sourcebigip, sourceAuthHeader)
-print('Source BIG-IP Version: %s' % (sourceVersion))
-destinationVersion = get_active_software_version(args.destinationbigip, destinationAuthHeader)
-print('Destination BIG-IP Version: %s' % (destinationVersion))
+theData = dict()
+virtualsList = []
 
-# combine two Python Dicts (our auth token and the Content-type json header) in preparation for doing POSTs
-sourcePostHeaders = sourceAuthHeader
-sourcePostHeaders.update(contentTypeJsonHeader)
-destinationPostHeaders = destinationAuthHeader
-destinationPostHeaders.update(contentTypeJsonHeader)
-
-destinationProfileSet = set()
-destinationMonitorSet = set()
-destinationPoolSet = set()
-destinationNodeSet = set()
-destinationCertSet = set()
-destinationKeySet = set()
-destinationRuleSet = set()
-destinationPolicySet = set()
-destinationPolicyStrategySet = set()
-destinationPersistenceSet = set()
-destinationSnatpoolSet = set()
-destinationDatagroupSet = set()
-generate_destination_sets()
-
-destinationVirtualSet = set()
-
-destinationVirtuals = destinationbip.get('%s/ltm/virtual/' % (destinationurl_base)).json()
-if destinationVirtuals.get('items'):
-    for virtual in destinationVirtuals['items']:
-        destinationVirtualSet.add(virtual['fullPath'])
-
-#print('destinationVirtualSet: %s' % (destinationVirtualSet))
-
-missingDatagroupSet = set()
-sourceInternalDatagroups = sourcebip.get('%s/ltm/data-group/internal/' % (sourceurl_base)).json()
-if sourceInternalDatagroups.get('items'):
-    for datagroup in sourceInternalDatagroups['items']:
-        if datagroup['fullPath'] not in destinationDatagroupSet:
-            missingDatagroupSet.add(datagroup['fullPath'])
-
-sourceExternalDatagroups = sourcebip.get('%s/ltm/data-group/external/' % (sourceurl_base)).json()
-if sourceExternalDatagroups.get('items'):
-    for datagroup in sourceExternalDatagroups['items']:
-        if datagroup['fullPath'] not in destinationDatagroupSet:
-            missingDatagroupSet.add(datagroup['fullPath'])
-
-print ('missingDatagroupSet: %s' % datagroup['fullPath'])
-
-sourceProfileTypeDict = dict()
-sourceProfiles = sourcebip.get('%s/ltm/profile/' % (sourceurl_base)).json()
-for profile in sourceProfiles['items']:
-    typeUrlFragment = profile['reference']['link'].split("/")[-1].split("?")[0]
-    profileTypeCollection = sourcebip.get('%s/ltm/profile/%s' % (sourceurl_base, typeUrlFragment)).json()
-    if profileTypeCollection.get('items'):
-        for profile in profileTypeCollection['items']:
-            sourceProfileTypeDict[profile['fullPath']] = typeUrlFragment
-
-#print ('sourceProfileDict: %s' % (sourceProfileDict))
-
-sourcePersistenceTypeDict = dict()
-sourcePersistenceProfiles = sourcebip.get('%s/ltm/persistence/' % (sourceurl_base)).json()
-for persistenceProfile in sourcePersistenceProfiles['items']:
-    typeUrlFragment = persistenceProfile['reference']['link'].split("/")[-1].split("?")[0]
-    persistenceProfileTypeCollection = sourcebip.get('%s/ltm/persistence/%s' % (sourceurl_base, typeUrlFragment)).json()
-    if persistenceProfileTypeCollection.get('items'):
-        for persistenceProfile in persistenceProfileTypeCollection['items']:
-            sourcePersistenceTypeDict[persistenceProfile['fullPath']] = typeUrlFragment
-
-#print ('sourcePersistenceTypeDict: %s' % (sourcePersistenceTypeDict))
-
-sourceMonitorTypeDict = dict()
-sourceMonitors = sourcebip.get('%s/ltm/monitor/' % (sourceurl_base)).json()
-for monitor in sourceMonitors['items']:
-    typeUrlFragment = monitor['reference']['link'].split("/")[-1].split("?")[0]
-    monitorTypeCollection = sourcebip.get('%s/ltm/monitor/%s' % (sourceurl_base, typeUrlFragment)).json()
-    if monitorTypeCollection.get('items'):
-        for monitor in monitorTypeCollection['items']:
-            sourceMonitorTypeDict[monitor['fullPath']] = typeUrlFragment
-
-#print ('sourceMonitorTypeDict: %s' % (sourceMonitorTypeDict))
-
-sourceVirtualDict = dict()
-sourceVirtualSet = set()
-sourceVirtuals = sourcebip.get('%s/ltm/virtual/' % (sourceurl_base)).json()
-for virtual in sourceVirtuals['items']:
-    sourceVirtualDict[virtual['name']] = virtual['fullPath']
-    sourceVirtualSet.add(virtual['fullPath'])
-    if args.allvirtuals:
-        if virtual['fullPath'] not in destinationVirtualSet:
-            print ('Source Virtual: %s missing from Destination BIG-IP' % (virtual['fullPath']))
-            copy_virtual(virtual['fullPath'])
-
-if args.virtual is not None:
-    for virtual in args.virtual:
+if args.copy or args.write:
+    theData['version'] = sourceSystemInfo['version']
+    theData['hostname'] = sourceSystemInfo['hostname']
+    theData['baseMac'] = sourceSystemInfo['baseMac']
+    theData['marketingName'] = sourceSystemInfo['marketingName']
+    if args.virtual is not None:
+        virtuals = args.virtual
+    elif args.allvirtuals:
+        virtuals = sourceVirtualSet
+    for virtual in virtuals:
+        sourceVirtual = dict()
+        virtualConfig = []
         if virtual in sourceVirtualSet:
-            print ('Virtual(s) to copy: %s|whitespacedetector' % (virtual))
-            if virtual not in destinationVirtualSet:
-                print('Copying virtual: %s' % (virtual))
-                copy_virtual(virtual)
-            else:
-                print('Virtual: %s already present on destination' % (virtual))
+            print ('Virtual(s) to copy: %s' % (virtual))
+            #sourceVirtualConfig = get_virtual(virtual)
+            sourceVirtual['virtualFullPath'] = virtual
+            sourceVirtual['virtualListConfig'] = get_virtual(virtual)
+            virtualsList.append(sourceVirtual)
+            #if virtual not in destinationVirtualSet:
+            #    print('Copying virtual: %s' % (virtual))
+            #    copy_virtual(virtual)
+            #else:
+            #    print('Virtual: %s already present on destination' % (virtual))
         elif virtual in sourceVirtualDict.keys():
             print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
-            copy_virtual(sourceVirtualDict[virtual])
+            sourceVirtual['virtualFullPath'] = sourceVirtualDict[virtual]
+            sourceVirtual['virtualListConfig'] = get_virtual(sourceVirtualDict[virtual])
+            virtualsList.append(sourceVirtual)
+            #if sourceVirtualDict[virtual] not in destinationVirtualSet:
+            #    print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
+            #    copy_virtual(sourceVirtualDict[virtual])
+            #else:
+            #    print('Virtual: %s already present on destination' % (virtual))
         else:
             print ('Virtual: %s not found on source BIG-IP' % (virtual))
+    theData['virtuals'] = virtualsList
+    if args.write:
+        with open(args.write, 'w') as fileOut:
+            json.dump(theData, fileOut, indent=4, sort_keys=True)
+
+
+
+if args.copy or args.read:
+    if args.read:
+        print('Reading Virtual Config Data from file: %s' % (args.read))
+        with open(args.read, 'r') as fileIn:
+            theData = json.load(fileIn)
+    elif args.copy:
+        print ('Copy Mode: beginning copy of virtuals to destination')
+    sourceShortVersion = float('%s.%s' % (theData['version'].split(".")[0], theData['version'].split(".")[1]))
+    destinationShortVersion = float('%s.%s' % (destinationSystemInfo['version'].split(".")[0], destinationSystemInfo['version'].split(".")[1]))
+    if sourceShortVersion > destinationShortVersion:
+        print ('Houston We Have a Problem')
+        downgradeString = 'You are copying configuration data from %s to %s; which is untested and likely to break; proceed?' % (theData['version'], destinationSystemInfo['version'])
+        if query_yes_no(downgradeString, default="no"):
+            print('Proceeding with caution; errors are likely.')
+        else:
+            quit()
+    virtualsList = theData['virtuals']
+    #print json.dumps(virtualsList, indent=4, sort_keys=True)
+    for virtual in virtualsList:
+        put_virtual(virtual['virtualFullPath'], virtual['virtualListConfig'])
