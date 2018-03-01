@@ -189,22 +189,6 @@ def put_key(fullPath, keyText):
     destinationsftp.rmdir('/tmp/_copy_virtual')
     destinationsftp.close()
 
-def put_cert_and_key(certWithKey):
-    print('Cert FullPath: %s' % (certWithKey['cert']['fullPath']))
-    print('Key FullPath: %s' % (certWithKey['key']['fullPath']))
-    cryptoPostPayload['name']=certWithKey['key']['fullPath']
-    cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (certWithKey['key']['fullPath'].replace("/", ":", 2))
-    keyPost = destinationbip.post('%s/sys/crypto/key' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
-    if keyPost.status_code == 200:
-        print('Successfully Posted Key: %s to destination BIG-IP' % (certWithKey['key']['fullPath']))
-    else:
-        print('Unsuccessful attempt to post key: %s to destination with JSON: %s' % (certWithKey['key']['fullPath'], cryptoPostPayload))
-        print('Body: %s' % (keyPost.content))
-    destinationsftp.remove(certWithKey['cert']['fullPath'].replace("/", ":", 2))
-    destinationsftp.remove(certWithKey['key']['fullPath'].replace("/", ":", 2))
-    destinationsftp.rmdir('/tmp/_copy_virtual')
-    destinationsftp.close()
-
 def get_virtual(virtualFullPath):
     virtualDict = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
     if virtualDict.get('pool'):
