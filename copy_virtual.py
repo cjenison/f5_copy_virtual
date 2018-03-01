@@ -4,6 +4,7 @@
 # Author: Chad Jenison (c.jenison at f5.com)
 # Version 1.0
 # Version 1.1 - Significant paring down due to expandSubcollections usage; added support for IP change of virtual as it is copied
+# Version 2.0 - Major changes to support offline operation, using JSON file as storage
 #
 # Script that attempts to move a virtual (and all supporting configuration) from one BIG-IP to another
 # Medium Term To-Do: Try to Handle Missing Cert/Keys by copying with scp
@@ -32,13 +33,15 @@ virtual = parser.add_mutually_exclusive_group()
 virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual Server(s) to attach to (with full path [e.g. /Common/test])')
 virtual.add_argument('--allvirtuals', '-a', help="Copy all virtuals to target system that aren't already found")
 mode = parser.add_mutually_exclusive_group()
-mode.add_argument('--copy', '-c', help='Copy from source to destination BIG-IP (online for both systems)' action='store_true')
+mode.add_argument('--copy', '-c', help='Copy from source to destination BIG-IP (online for both systems)', action='store_true')
 mode.add_argument('--write', '-w', help='Write JSON File Output (provide filename)')
 mode.add_argument('--read', '-r', help='Read JSON File Output and push to Destination BIG-IP (provide filename)')
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
 parser.add_argument('--destsuffix', help='Use a suffix for configuration objects on destination [do not re-use existing objects already on destination]')
 parser.add_argument('--disableonsource', '-disable', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination')
+parser.add_argument('--nocertandkey', '-nck', help='Do not retrieve or push certs/keys and instead alter reference to default.crt and default.key')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination')
+#parser.add_argument('--file', '-f', help='Filename to read or write to')
 parser.add_argument('--noprompt', '-n', help='Do not prompt for confirmation of copying operations', action='store_true')
 
 args = parser.parse_args()
@@ -174,7 +177,6 @@ def put_cert_and_key(certWithKey):
 
 def get_virtual(virtualFullPath):
     virtualDict = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
-    del virtualDict['selfLink']
     if virtualDict.get('pool'):
         virtualConfig.append(get_pool(virtualDict['pool']))
     if virtualDict.get('sourceAddressTranslation').get('pool'):
@@ -215,6 +217,46 @@ def get_virtual(virtualFullPath):
     #    print('Unsuccessful attempt to copy virtual: %s ; StatusCode: %s' % (virtualFullPath, copiedVirtual.status_code))
     #    print('Body: %s' % (copiedVirtual.content))
 
+def put_virtual(virtualFullPath, virtualConfigArray):
+    print('Attempting Put of Virtual: %s to BIG-IP: %s' % (virtualFullPath, args.destinationbigip))
+    for configObject in virtualConfigArray:
+        put_json(configObject['fullPath'], configObject)
+
+def put_json(fullPath, configDict):
+    print('fullPath Argument: %s' % (fullPath))
+    print('fullPath fromDict: %s' % (configDict['fullPath']))
+    print('kind: %s' % (configDict['kind']))
+    objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
+    postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
+    print ('objectUrl: %s' % (objectUrl))
+    print ('postUrl: %s' % (postUrl))
+    destinationObjectGet = destinationbip.get(objectUrl)
+    if destinationObjectGet.status_code == 200:
+        print('config object: %s already on destination; leaving in place' % (fullPath))
+    elif destinationObjectGet.status_code == 404:
+        if configDict['kind'] == 'tm:ltm:virtual:virtualstate':
+            ### Observed problems posting this to Old BIG-IP
+            del configDict['serviceDownImmediateAction']
+            if configDict.get('rulesReference'):
+                del configDict['rulesReference']
+        elif configDict['kind'] == 'tm:ltm:pool:poolstate':
+            for member in configDict['membersReference']['items']:
+                del member['state']
+                del member['ephemeral']
+        elif configDict['kind'] == 'tm:ltm:snatpool:snatpoolstate':
+            if configDict.get('membersReference'):
+                del configDict['membersReference']
+        elif configDict['kind'] == 'tm:ltm:policy:policystate':
+            print('Deal with Policies specially based on destination version')
+        print ('Posting to: %s' % (postUrl))
+        destinationObjectPost = destinationbip.post(postUrl, headers=destinationPostHeaders, data=json.dumps(configDict))
+        if destinationObjectPost.status_code == 200:
+            print ('Successfully Posted Object: %s to URL: %s' % (fullPath, postUrl))
+        else:
+            print ('Unsuccessful Post of Object: %s to URL: %s' % (fullPath, postUrl))
+            print ('Payload: %s' % (json.dumps(configDict)))
+            print ('Status Code: %s - Body: %s' % (destinationObjectPost.status_code, destinationObjectPost.content))
+
 def obtain_new_vs_destination(destination, port, mask):
     changeDestination = 'Destination: %s - Change?' % (destination)
     if query_yes_no(changeDestination, default="yes"):
@@ -249,12 +291,27 @@ def obtain_new_vs_destination(destination, port, mask):
     destination = {'ip': newDestination, 'port':newPort, 'mask':newMask}
     return destination
 
+def get_cert(certFullPath):
+    certDict = sourcebip.get('%s/sys/crypto/cert/%s' % (sourceurl_base, certFullPath.replace("/", "~", 2))).json()
+    return certDict
+
+def get_key(keyFullPath):
+    keyDict = sourcebip.get('%s/sys/crypto/key/%s' % (sourceurl_base, keyFullPath.replace("/", "~", 2))).json()
+    return keyDict
+
 def get_profile(profileFullPath):
     profileDict = sourcebip.get('%s/ltm/profile/%s/%s' % (sourceurl_base, sourceProfileTypeDict[profileFullPath], profileFullPath.replace("/", "~", 2))).json()
     if sourceProfileTypeDict[profileFullPath] == 'client-ssl':
         print('Profile: %s is client-ssl' % (profileFullPath))
-        #if args.getcert:
-        #    get_cert_and_key(profileDict['cert'], profileDict['key'])
+        if not args.nocertandkey:
+            cert = get_cert(profileDict['cert'])
+            key = get_key(profileDict['key'])
+            certAndKey = get_cert_and_key(profileDict['cert'], profileDict['key'])
+            cert['certText']=certAndKey['cert']['certText']
+            key['keyText']=certAndKey['key']['keyText']
+        else:
+            print('Need to adjust profile reference to default.crt and default.key')
+            #alter references in profile to default.crt and default.key
         if profileDict.get('passphrase'):
             print('Profile: %s uses a key with passphrase protection' % (profileFullPath))
             del profileDict['passphrase']
@@ -368,8 +425,9 @@ def generate_destination_sets():
             destinationDatagroupSet.add(datagroup['fullPath'])
 
     destinationSnatpools = destinationbip.get('%s/ltm/snatpool/' % (destinationurl_base)).json()
-    for snatpool in destinationSnatpools['items']:
-        destinationSnatpoolSet.add(snatpool['fullPath'])
+    if destinationSnatpools.get('items'):
+        for snatpool in destinationSnatpools['items']:
+            destinationSnatpoolSet.add(snatpool['fullPath'])
 
     destinationPolicies = destinationbip.get('%s/ltm/policy/' % (destinationurl_base)).json()
     for policy in destinationPolicies['items']:
@@ -487,31 +545,48 @@ if args.sourcebigip:
 
 virtualsList = []
 
-if args.virtual is not None:
-    for virtual in args.virtual:
-        sourceVirtual = dict()
-        virtualConfig = []
-        if virtual in sourceVirtualSet:
-            print ('Virtual(s) to copy: %s' % (virtual))
-            #sourceVirtualConfig = get_virtual(virtual)
-            sourceVirtual['name'] = virtual
-            sourceVirtual['config'] = get_virtual(virtual)
-            virtualsList.append(sourceVirtual)
-            #if virtual not in destinationVirtualSet:
-            #    print('Copying virtual: %s' % (virtual))
-            #    copy_virtual(virtual)
-            #else:
-            #    print('Virtual: %s already present on destination' % (virtual))
-        elif virtual in sourceVirtualDict.keys():
-            print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
-            sourceVirtual['name'] = sourceVirtualDict[virtual]
-            sourceVirtual['config'] = get_virtual(sourceVirtualDict[virtual])
-            virtualsList.append(sourceVirtual)
-            #if sourceVirtualDict[virtual] not in destinationVirtualSet:
-            #    print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
-            #    copy_virtual(sourceVirtualDict[virtual])
-            #else:
-            #    print('Virtual: %s already present on destination' % (virtual))
-        else:
-            print ('Virtual: %s not found on source BIG-IP' % (virtual))
-        print json.dumps(sourceVirtual['config'], indent=4, sort_keys=True)
+if args.copy or args.write:
+    if args.virtual is not None:
+        for virtual in args.virtual:
+            sourceVirtual = dict()
+            virtualConfig = []
+            if virtual in sourceVirtualSet:
+                print ('Virtual(s) to copy: %s' % (virtual))
+                #sourceVirtualConfig = get_virtual(virtual)
+                sourceVirtual['virtualFullPath'] = virtual
+                sourceVirtual['virtualListConfig'] = get_virtual(virtual)
+                virtualsList.append(sourceVirtual)
+                #if virtual not in destinationVirtualSet:
+                #    print('Copying virtual: %s' % (virtual))
+                #    copy_virtual(virtual)
+                #else:
+                #    print('Virtual: %s already present on destination' % (virtual))
+            elif virtual in sourceVirtualDict.keys():
+                print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
+                sourceVirtual['virtualFullPath'] = sourceVirtualDict[virtual]
+                sourceVirtual['virtualListConfig'] = get_virtual(sourceVirtualDict[virtual])
+                virtualsList.append(sourceVirtual)
+                #if sourceVirtualDict[virtual] not in destinationVirtualSet:
+                #    print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
+                #    copy_virtual(sourceVirtualDict[virtual])
+                #else:
+                #    print('Virtual: %s already present on destination' % (virtual))
+            else:
+                print ('Virtual: %s not found on source BIG-IP' % (virtual))
+            print json.dumps(virtualsList, indent=4, sort_keys=True)
+    if args.write:
+        with open(args.write, 'w') as jsonVirtuals:
+            json.dump(virtualsList, jsonVirtuals, indent=4, sort_keys=True)
+
+
+
+if args.copy or args.read:
+    if args.read:
+        print('Reading from file')
+        with open(args.read) as jsonVirtuals:
+            virtualsList = json.load(jsonVirtuals)
+        #print json.dumps(virtualsList, indent=4, sort_keys=True)
+        for virtual in virtualsList:
+            put_virtual(virtual['virtualFullPath'], virtual['virtualListConfig'])
+    elif args.copy:
+        print json.dumps(virtualsList, indent=4, sort_keys=True)
