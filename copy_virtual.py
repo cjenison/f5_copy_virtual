@@ -271,50 +271,21 @@ def copy_profile(profileFullPath):
         print ('Unsuccessful attempt to copy %s profile: %s ; StatusCode: %s' % (sourceProfileTypeDict[profileFullPath], profileFullPath, copiedProfile.status_code))
         print ('Body: %s' % (copiedProfile.content))
 
-def copy_rule(ruleFullPath):
+def get_rule(ruleFullPath):
     ruleJson = sourcebip.get('%s/ltm/rule/%s' % (sourceurl_base, ruleFullPath.replace("/", "~", 2))).json()
-    #if ruleJson.get('selfLink'):
-    del ruleJson['selfLink']
-    copiedRule = destinationbip.post('%s/ltm/rule' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(ruleJson))
-    if copiedRule.status_code == 200:
-        print ('Successfully Copied Rule: %s' % (ruleFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy rule: %s ; StatusCode: %s' % (ruleFullPath, copiedRule.status_code))
-        print ('Body: %s' % (copiedRule.content))
+    return ruleJson
 
-def copy_persistence(persistenceFullPath):
+def get_persistence(persistenceFullPath):
     persistenceJson = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))).json()
-    del persistenceJson['selfLink']
-    copiedPersistence = destinationbip.post('%s/ltm/persistence/%s' % (destinationurl_base, sourcePersistenceTypeDict[persistenceFullPath]), headers=destinationPostHeaders, data=json.dumps(persistenceJson))
-    if copiedPersistence.status_code == 200:
-        print ('Successfully Copied Persistence Profile: %s' % (persistenceFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy persistence profile: %s ; StatusCode: %s' % (persistenceFullPath, copiedPersistence.status_code))
-        print ('Body: %s' % (copiedPersistence.content))
+    return persistenceJson
 
-def copy_monitor(monitorFullPath):
+def get_monitor(monitorFullPath):
     monitorJson = sourcebip.get('%s/ltm/monitor/%s/%s' % (sourceurl_base, sourceMonitorTypeDict[monitorFullPath], monitorFullPath.replace("/", "~", 2))).json()
-    del monitorJson['selfLink']
-    copiedMonitor = destinationbip.post('%s/ltm/monitor/%s' % (destinationurl_base, sourceMonitorTypeDict[monitorFullPath]), headers=destinationPostHeaders, data=json.dumps(monitorJson))
-    if copiedMonitor.status_code == 200:
-        print ('Successfully Copied Monitor: %s' % (monitorFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy monitor: %s ; StatusCode: %s' % (monitorFullPath, copiedMonitor.status_code))
-        print ('Body: %s' % (copiedMonitor.content))
+    return monitorJson
 
 def copy_snatpool(snatpoolFullPath):
     snatpoolJson = sourcebip.get('%s/ltm/snatpool/%s' % (sourceurl_base, snatpoolFullPath.replace("/", "~", 2))).json()
-    del snatpoolJson['selfLink']
-    copiedSnatpool = destinationbip.post('%s/ltm/snatpool/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(snatpoolJson))
-    if copiedSnatpool.status_code == 200:
-        print ('Successfully Copied Snatpool: %s' % (snatpoolFullPath))
-        generate_destination_sets()
-    else:
-        print ('Unsuccessful attempt to copy snatpool: %s ; StatusCode: %s' % (snatpoolFullPath, copiedSnatpool.status_code))
-        print ('Body: %s' % (copiedSnatpool.content))
+    return snatpoolJson
 
 def get_pool(poolFullPath):
     poolDict = sourcebip.get('%s/ltm/pool/%s' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
