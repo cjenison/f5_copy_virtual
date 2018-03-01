@@ -494,7 +494,6 @@ if args.virtual is not None:
             #sourceVirtualConfig = get_virtual(virtual)
             sourceVirtual['name'] = virtual
             sourceVirtual['config'] = get_virtual(virtual)
-            print('Virtual JSON: %s' % json.dumps(sourceVirtual['config']))
             virtualsList.append(sourceVirtual)
             #if virtual not in destinationVirtualSet:
             #    print('Copying virtual: %s' % (virtual))
@@ -505,7 +504,6 @@ if args.virtual is not None:
             print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
             sourceVirtual['name'] = sourceVirtualDict[virtual]
             sourceVirtual['config'] = get_virtual(sourceVirtualDict[virtual])
-            print('Virtual JSON: %s' % json.dumps(sourceVirtual['config']))
             virtualsList.append(sourceVirtual)
             #if sourceVirtualDict[virtual] not in destinationVirtualSet:
             #    print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
@@ -514,3 +512,4 @@ if args.virtual is not None:
             #    print('Virtual: %s already present on destination' % (virtual))
         else:
             print ('Virtual: %s not found on source BIG-IP' % (virtual))
+        print json.dumps(sourceVirtual['config'], indent=4, sort_keys=True)
