@@ -31,7 +31,7 @@ parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destinat
 parser.add_argument('--user', '-u', help='username to use for authentication', required=True)
 virtual = parser.add_mutually_exclusive_group()
 virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual Server(s) to attach to (with full path [e.g. /Common/test])')
-virtual.add_argument('--allvirtuals', '-a', help="Copy all virtuals to target system that aren't already found")
+virtual.add_argument('--allvirtuals', '-a', help="Select all virtuals to target system that aren't already found", action='store_true')
 mode = parser.add_mutually_exclusive_group()
 mode.add_argument('--copy', '-c', help='Copy from source to destination BIG-IP (online for both systems)', action='store_true')
 mode.add_argument('--write', '-w', help='Write JSON File Output (provide filename)')
@@ -137,9 +137,7 @@ def get_cert_and_key(certFullPath, keyFullPath):
     certWithKey = {'cert': {'fullPath': certFullPath, 'certText': certFile}, 'key': {'fullPath': keyFullPath, 'keyText': keyFile}}
     return certWithKey
 
-def put_cert_and_key(certWithKey):
-    print('Cert FullPath: %s' % (certWithKey['cert']['fullPath']))
-    print('Key FullPath: %s' % (certWithKey['key']['fullPath']))
+def put_cert(fullPath, certText):
     destinationssh = paramiko.SSHClient()
     destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
@@ -147,22 +145,53 @@ def put_cert_and_key(certWithKey):
     destinationsftp.chdir('/tmp/')
     destinationsftp.mkdir('_copy_virtual')
     destinationsftp.chdir('_copy_virtual')
-    certFileWrite = destinationsftp.open(certWithKey['cert']['fullPath'].replace("/", ":", 2), 'w')
-    certFileWrite.write(certWithKey['cert']['certText'])
+    certFileWrite = destinationsftp.open(fullPath.replace("/", ":", 2), 'w')
+    certFileWrite.write(certText)
     certFileWrite.close()
-    keyFileWrite = destinationsftp.open(certWithKey['key']['fullPath'].replace("/", ":", 2), 'w')
-    keyFileWrite.write(certWithKey['key']['keyText'])
-    keyFileWrite.close()
-    cryptoPostPayload = {}
-    cryptoPostPayload['command']='install'
-    cryptoPostPayload['name']=certWithKey['cert']['fullPath']
-    cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (certWithKey['cert']['fullPath'].replace("/", ":", 2))
-    certPost = destinationbip.post('%s/sys/crypto/cert' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
+    certPostPayload = {}
+    certPostPayload['command']='install'
+    certPostPayload['name']=fullPath
+    certPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":", 2))
+    certPost = destinationbip.post('%s/sys/crypto/cert' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(certPostPayload))
     if certPost.status_code == 200:
-        print('Successfully Posted Cert: %s to destination BIG-IP' % (certWithKey['cert']['fullPath']))
+        print('Successfully Posted Cert: %s to destination BIG-IP' % (fullPath))
+        destinationCertSet.add(fullPath)
     else:
-        print('Unsuccessful attempt to post cert: %s to destination with JSON: %s' % (certWithKey['cert']['fullPath'], cryptoPostPayload))
+        print('Unsuccessful attempt to post cert: %s to destination with JSON: %s' % (fullPath, certPostPayload))
         print('Body: %s' % (certPost.content))
+    destinationsftp.remove(fullPath.replace("/", ":", 2))
+    destinationsftp.rmdir('/tmp/_copy_virtual')
+    destinationsftp.close()
+
+def put_key(fullPath, keyText):
+    destinationssh = paramiko.SSHClient()
+    destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
+    destinationsftp = destinationssh.open_sftp()
+    destinationsftp.chdir('/tmp/')
+    destinationsftp.mkdir('_copy_virtual')
+    destinationsftp.chdir('_copy_virtual')
+    keyFileWrite = destinationsftp.open(fullPath.replace("/", ":", 2), 'w')
+    keyFileWrite.write(keyText)
+    keyFileWrite.close()
+    keyPostPayload = {}
+    keyPostPayload['command']='install'
+    keyPostPayload['name']=fullPath
+    keyPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":", 2))
+    keyPost = destinationbip.post('%s/sys/crypto/key' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(keyPostPayload))
+    if keyPost.status_code == 200:
+        print('Successfully Posted Key: %s to destination BIG-IP' % (fullPath))
+        destinationKeySet.add(fullPath)
+    else:
+        print('Unsuccessful attempt to post key: %s to destination with JSON: %s' % (fullPath, keyPostPayload))
+        print('Body: %s' % (keyPost.content))
+    destinationsftp.remove(fullPath.replace("/", ":", 2))
+    destinationsftp.rmdir('/tmp/_copy_virtual')
+    destinationsftp.close()
+
+def put_cert_and_key(certWithKey):
+    print('Cert FullPath: %s' % (certWithKey['cert']['fullPath']))
+    print('Key FullPath: %s' % (certWithKey['key']['fullPath']))
     cryptoPostPayload['name']=certWithKey['key']['fullPath']
     cryptoPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (certWithKey['key']['fullPath'].replace("/", ":", 2))
     keyPost = destinationbip.post('%s/sys/crypto/key' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
@@ -174,6 +203,7 @@ def put_cert_and_key(certWithKey):
     destinationsftp.remove(certWithKey['cert']['fullPath'].replace("/", ":", 2))
     destinationsftp.remove(certWithKey['key']['fullPath'].replace("/", ":", 2))
     destinationsftp.rmdir('/tmp/_copy_virtual')
+    destinationsftp.close()
 
 def get_virtual(virtualFullPath):
     virtualDict = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
@@ -236,7 +266,8 @@ def put_json(fullPath, configDict):
     elif destinationObjectGet.status_code == 404:
         if configDict['kind'] == 'tm:ltm:virtual:virtualstate':
             ### Observed problems posting this to Old BIG-IP
-            del configDict['serviceDownImmediateAction']
+            if configDict.get('serviceDownImmediateAction'):
+                del configDict['serviceDownImmediateAction']
             if configDict.get('rulesReference'):
                 del configDict['rulesReference']
         elif configDict['kind'] == 'tm:ltm:pool:poolstate':
@@ -248,6 +279,28 @@ def put_json(fullPath, configDict):
                 del configDict['membersReference']
         elif configDict['kind'] == 'tm:ltm:policy:policystate':
             print('Deal with Policies specially based on destination version')
+        elif configDict['kind'] == 'tm:sys:crypto:cert:certstate':
+            if fullPath not in destinationCertSet and not args.nocertandkey:
+                if configDict.get('certText'):
+                    put_cert(configDict['fullPath'], configDict['certText'])
+        elif configDict['kind'] == 'tm:sys:crypto:key:keystate':
+            if fullPath not in destinationKeySet and not args.nocertandkey:
+                if configDict.get('keyText'):
+                    put_key(configDict['fullPath'], configDict['keyText'])
+        elif configDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
+            ### FIX BELOW TO Handle CertkeyChain properly
+            if configDict.get('certKeyChain'):
+                del configDict['certKeyChain']
+            if configDict['cert'] not in destinationCertSet or configDict['key'] not in destinationKeySet:
+                print('cert: %s and/or key: %s missing on destination - altering cert/key references to default.crt/default.key')
+                configDict['cert'] = '/Common/default.crt'
+                configDict['key'] = '/Common/default.crt'
+            else:
+                if configDict.get('passphrase'):
+                    print('Source client-ssl profile: %s contains encrypted passphrase; need to re-obtain passphrase')
+                    print('**Note: passphrases are encrypted on BIG-IP using Secure Vault technology')
+                    print('**Note: passphrase will be submitted via iControl REST, but will be immediately encrypted on BIG-IP')
+                    configDict['passphrase'] = get_passphrase(configDict['fullPath'])
         print ('Posting to: %s' % (postUrl))
         destinationObjectPost = destinationbip.post(postUrl, headers=destinationPostHeaders, data=json.dumps(configDict))
         if destinationObjectPost.status_code == 200:
@@ -309,18 +362,11 @@ def get_profile(profileFullPath):
             certAndKey = get_cert_and_key(profileDict['cert'], profileDict['key'])
             cert['certText']=certAndKey['cert']['certText']
             key['keyText']=certAndKey['key']['keyText']
+            virtualConfig.append(cert)
+            virtualConfig.append(key)
         else:
-            print('Need to adjust profile reference to default.crt and default.key')
+            print('May need to adjust profile reference to default.crt and default.key')
             #alter references in profile to default.crt and default.key
-        if profileDict.get('passphrase'):
-            print('Profile: %s uses a key with passphrase protection' % (profileFullPath))
-            del profileDict['passphrase']
-            # Investigate Chained Certs
-            #del profileJson['certKeyChain']
-            passphrase = get_passphrase(profileDict['fullPath'])
-            profileDict['passphrase'] = passphrase
-        else:
-            print('Profile: %s does not use passphrase protection' % (profileFullPath))
     return profileDict
 
 def get_rule(ruleFullPath):
@@ -375,82 +421,11 @@ def get_policy_strategy(policyStrategyFullPath):
     policyStrategyDict = sourcebip.get('%s/ltm/policy-strategy/%s' % (sourceurl_base, policyStrategyFullPath.replace("/", "~", 2))).json()
     return policyStrategyDict
 
-def generate_destination_sets():
-    destinationProfileTypes = destinationbip.get('%s/ltm/profile/' % (destinationurl_base)).json()
-    for profileType in destinationProfileTypes['items']:
-        typeString = profileType['reference']['link'].split("/")[-1].split("?")[0]
-        profileTypeCollection = destinationbip.get('%s/ltm/profile/%s' % (destinationurl_base, typeString)).json()
-        if profileTypeCollection.get('items'):
-            for profile in profileTypeCollection['items']:
-                destinationProfileSet.add(profile['fullPath'])
-
-    destinationPools = destinationbip.get('%s/ltm/pool/' % (destinationurl_base)).json()
-    if destinationPools.get('items'):
-        for pool in destinationPools['items']:
-            destinationPoolSet.add(pool['fullPath'])
-
-    destinationMonitorTypes = destinationbip.get('%s/ltm/monitor/' % (destinationurl_base)).json()
-    for monitorType in destinationMonitorTypes['items']:
-        typeString = monitorType['reference']['link'].split("/")[-1].split("?")[0]
-        monitorTypeCollection = destinationbip.get('%s/ltm/monitor/%s' % (destinationurl_base, typeString)).json()
-        if monitorTypeCollection.get('items'):
-            for monitor in monitorTypeCollection['items']:
-                destinationMonitorSet.add(monitor['fullPath'])
-
-    destinationNodes = destinationbip.get('%s/ltm/node/' % (destinationurl_base)).json()
-    if destinationNodes.get('items'):
-        for node in destinationNodes['items']:
-            destinationNodeSet.add(node['fullPath'])
-
-    destinationCerts = destinationbip.get('%s/sys/crypto/cert/' % (destinationurl_base)).json()
-    for cert in destinationCerts['items']:
-        destinationCertSet.add(cert['fullPath'])
-
-    destinationKeys = destinationbip.get('%s/sys/crypto/key/' % (destinationurl_base)).json()
-    for key in destinationKeys['items']:
-        destinationKeySet.add(key['fullPath'])
-
-    destinationRules = destinationbip.get('%s/ltm/rule/' % (destinationurl_base)).json()
-    for rule in destinationRules['items']:
-        destinationRuleSet.add(rule['fullPath'])
-
-    destinationInternalDatagroups = destinationbip.get('%s/ltm/data-group/internal/' % (destinationurl_base)).json()
-    if destinationInternalDatagroups.get('items'):
-        for datagroup in destinationInternalDatagroups['items']:
-            destinationDatagroupSet.add(datagroup['fullPath'])
-
-    destinationExternalDatagroups = destinationbip.get('%s/ltm/data-group/external/' % (destinationurl_base)).json()
-    if destinationExternalDatagroups.get('items'):
-        for datagroup in destinationExternalDatagroups['items']:
-            destinationDatagroupSet.add(datagroup['fullPath'])
-
-    destinationSnatpools = destinationbip.get('%s/ltm/snatpool/' % (destinationurl_base)).json()
-    if destinationSnatpools.get('items'):
-        for snatpool in destinationSnatpools['items']:
-            destinationSnatpoolSet.add(snatpool['fullPath'])
-
-    destinationPolicies = destinationbip.get('%s/ltm/policy/' % (destinationurl_base)).json()
-    for policy in destinationPolicies['items']:
-        destinationPolicySet.add(policy['fullPath'])
-
-    destinationPolicyStrategies = destinationbip.get('%s/ltm/policy-strategy/' % (destinationurl_base)).json()
-    for policyStrategy in destinationPolicyStrategies['items']:
-        destinationPolicyStrategySet.add(policyStrategy['fullPath'])
-
-    destinationPersistenceTypes = destinationbip.get('%s/ltm/persistence/' % (destinationurl_base)).json()
-    for persistenceType in destinationPersistenceTypes['items']:
-        typeString = persistenceType['reference']['link'].split("/")[-1].split("?")[0]
-        persistenceTypeCollection = destinationbip.get('%s/ltm/persistence/%s' % (destinationurl_base, typeString)).json()
-        if persistenceTypeCollection.get('items'):
-            for persistenceProfile in persistenceTypeCollection['items']:
-                destinationPersistenceSet.add(persistenceProfile['fullPath'])
-
-
 user = args.user
 passwd = getpass.getpass("Password for " + user + ":")
 requests.packages.urllib3.disable_warnings()
 
-if args.destinationbigip:
+if args.destinationbigip and (args.copy or args.read):
     destinationurl_base = ('https://%s/mgmt/tm' % (args.destinationbigip))
     destinationbip = requests.session()
     destinationbip.verify = False
@@ -461,27 +436,21 @@ if args.destinationbigip:
     print('Destination BIG-IP Version: %s' % (destinationVersion))
     destinationPostHeaders = destinationAuthHeader
     destinationPostHeaders.update(contentTypeJsonHeader)
-    destinationProfileSet = set()
-    destinationMonitorSet = set()
-    destinationPoolSet = set()
-    destinationNodeSet = set()
     destinationCertSet = set()
     destinationKeySet = set()
-    destinationRuleSet = set()
-    destinationPolicySet = set()
-    destinationPolicyStrategySet = set()
-    destinationPersistenceSet = set()
-    destinationSnatpoolSet = set()
-    destinationDatagroupSet = set()
-    # Generate Destination Object Sets (to check for existence)
-    generate_destination_sets()
     destinationVirtualSet = set()
     destinationVirtuals = destinationbip.get('%s/ltm/virtual/' % (destinationurl_base)).json()
     if destinationVirtuals.get('items'):
         for virtual in destinationVirtuals['items']:
             destinationVirtualSet.add(virtual['fullPath'])
+    destinationCerts = destinationbip.get('%s/sys/crypto/cert/' % (destinationurl_base)).json()
+    for cert in destinationCerts['items']:
+        destinationCertSet.add(cert['fullPath'])
+    destinationKeys = destinationbip.get('%s/sys/crypto/key/' % (destinationurl_base)).json()
+    for key in destinationKeys['items']:
+        destinationKeySet.add(key['fullPath'])
 
-if args.sourcebigip:
+if args.sourcebigip and (args.copy or args.write):
     sourceurl_base = ('https://%s/mgmt/tm' % (args.sourcebigip))
     sourcebip = requests.session()
     sourcebip.verify = False
@@ -492,7 +461,6 @@ if args.sourcebigip:
     print('Source BIG-IP Version: %s' % (sourceVersion))
     sourcePostHeaders = sourceAuthHeader
     sourcePostHeaders.update(contentTypeJsonHeader)
-
 
     sourceProfileTypeDict = dict()
     sourceProfiles = sourcebip.get('%s/ltm/profile/' % (sourceurl_base)).json()
@@ -527,10 +495,6 @@ if args.sourcebigip:
     for virtual in sourceVirtuals['items']:
         sourceVirtualDict[virtual['name']] = virtual['fullPath']
         sourceVirtualSet.add(virtual['fullPath'])
-        if args.allvirtuals:
-            if virtual['fullPath'] not in destinationVirtualSet:
-                print ('Source Virtual: %s missing from Destination BIG-IP' % (virtual['fullPath']))
-                copy_virtual(virtual['fullPath'])
 
     sourceDatagroupSet = set()
     sourceInternalDatagroups = sourcebip.get('%s/ltm/data-group/internal/' % (sourceurl_base)).json()
@@ -547,33 +511,36 @@ virtualsList = []
 
 if args.copy or args.write:
     if args.virtual is not None:
-        for virtual in args.virtual:
-            sourceVirtual = dict()
-            virtualConfig = []
-            if virtual in sourceVirtualSet:
-                print ('Virtual(s) to copy: %s' % (virtual))
-                #sourceVirtualConfig = get_virtual(virtual)
-                sourceVirtual['virtualFullPath'] = virtual
-                sourceVirtual['virtualListConfig'] = get_virtual(virtual)
-                virtualsList.append(sourceVirtual)
-                #if virtual not in destinationVirtualSet:
-                #    print('Copying virtual: %s' % (virtual))
-                #    copy_virtual(virtual)
-                #else:
-                #    print('Virtual: %s already present on destination' % (virtual))
-            elif virtual in sourceVirtualDict.keys():
-                print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
-                sourceVirtual['virtualFullPath'] = sourceVirtualDict[virtual]
-                sourceVirtual['virtualListConfig'] = get_virtual(sourceVirtualDict[virtual])
-                virtualsList.append(sourceVirtual)
-                #if sourceVirtualDict[virtual] not in destinationVirtualSet:
-                #    print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
-                #    copy_virtual(sourceVirtualDict[virtual])
-                #else:
-                #    print('Virtual: %s already present on destination' % (virtual))
-            else:
-                print ('Virtual: %s not found on source BIG-IP' % (virtual))
-            print json.dumps(virtualsList, indent=4, sort_keys=True)
+        virtuals = args.virtual
+    elif args.allvirtuals:
+        virtuals = sourceVirtualSet
+    for virtual in virtuals:
+        sourceVirtual = dict()
+        virtualConfig = []
+        if virtual in sourceVirtualSet:
+            print ('Virtual(s) to copy: %s' % (virtual))
+            #sourceVirtualConfig = get_virtual(virtual)
+            sourceVirtual['virtualFullPath'] = virtual
+            sourceVirtual['virtualListConfig'] = get_virtual(virtual)
+            virtualsList.append(sourceVirtual)
+            #if virtual not in destinationVirtualSet:
+            #    print('Copying virtual: %s' % (virtual))
+            #    copy_virtual(virtual)
+            #else:
+            #    print('Virtual: %s already present on destination' % (virtual))
+        elif virtual in sourceVirtualDict.keys():
+            print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
+            sourceVirtual['virtualFullPath'] = sourceVirtualDict[virtual]
+            sourceVirtual['virtualListConfig'] = get_virtual(sourceVirtualDict[virtual])
+            virtualsList.append(sourceVirtual)
+            #if sourceVirtualDict[virtual] not in destinationVirtualSet:
+            #    print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
+            #    copy_virtual(sourceVirtualDict[virtual])
+            #else:
+            #    print('Virtual: %s already present on destination' % (virtual))
+        else:
+            print ('Virtual: %s not found on source BIG-IP' % (virtual))
+        print json.dumps(virtualsList, indent=4, sort_keys=True)
     if args.write:
         with open(args.write, 'w') as jsonVirtuals:
             json.dump(virtualsList, jsonVirtuals, indent=4, sort_keys=True)
