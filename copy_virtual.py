@@ -38,7 +38,8 @@ mode.add_argument('--write', '-w', help='Write JSON File Output (provide filenam
 mode.add_argument('--read', '-r', help='Read JSON File Output and push to Destination BIG-IP (provide filename)')
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
 parser.add_argument('--destsuffix', help='Use a suffix for configuration objects on destination [do not re-use existing objects already on destination]')
-parser.add_argument('--disableonsource', '-disable', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination')
+parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
+parser.add_argument('--disableondestination', '-dd', help='Disable Virtual Server on Destination BIG-IP as it is copied', action='store_true')
 parser.add_argument('--nocertandkey', '-nck', help='Do not retrieve or push certs/keys and instead alter reference to default.crt and default.key')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination')
 #parser.add_argument('--file', '-f', help='Filename to read or write to')
@@ -249,6 +250,17 @@ def put_json(fullPath, configDict):
         print('config object: %s already on destination; leaving in place' % (fullPath))
     elif destinationObjectGet.status_code == 404:
         if configDict['kind'] == 'tm:ltm:virtual:virtualstate':
+            if args.ipchange:
+                changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
+                if query_yes_no(changeDestination, default="yes"):
+                    newDestination = obtain_new_vs_destination(configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
+                    destinationPartition = configDict['destination'].split("/")[1]
+                    configDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
+                    configDict['mask'] = newDestination['mask']
+            if args.disableondestination:
+                if configDict.get('enabled'):
+                    del configDict['enabled']
+                configDict['disabled'] = True
             ### Observed problems posting this to Old BIG-IP
             if configDict.get('serviceDownImmediateAction'):
                 del configDict['serviceDownImmediateAction']
