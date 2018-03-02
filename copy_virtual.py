@@ -236,12 +236,6 @@ def get_virtual(virtualFullPath):
             virtualDict['mask'] = newDestination['mask']
     virtualConfig.append(virtualDict)
     return virtualConfig
-    #copiedVirtual = destinationbip.post('%s/ltm/virtual/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(virtualDict))
-    #if copiedVirtual.status_code == 200:
-    #    print('Successfully Copied Virtual: %s' % (virtualFullPath))
-    #else:
-    #    print('Unsuccessful attempt to copy virtual: %s ; StatusCode: %s' % (virtualFullPath, copiedVirtual.status_code))
-    #    print('Body: %s' % (copiedVirtual.content))
 
 def put_virtual(virtualFullPath, virtualConfigArray):
     print('**Processing Virtual: %s to BIG-IP: %s' % (virtualFullPath, args.destinationbigip))
@@ -249,13 +243,10 @@ def put_virtual(virtualFullPath, virtualConfigArray):
         put_json(configObject['fullPath'], configObject)
 
 def put_json(fullPath, configDict):
-    #print('fullPath Argument: %s' % (fullPath))
-    #print('fullPath fromDict: %s' % (configDict['fullPath']))
     #print('kind: %s' % (configDict['kind']))
     objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
     postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
     print ('objectUrl: %s' % (objectUrl))
-    #print ('postUrl: %s' % (postUrl))
     destinationObjectGet = destinationbip.get(objectUrl)
     if destinationObjectGet.status_code == 200:
         print('config object: %s already on destination; leaving in place' % (fullPath))
@@ -273,7 +264,7 @@ def put_json(fullPath, configDict):
                 if configDict.get('enabled'):
                     del configDict['enabled']
                 configDict['disabled'] = True
-            ### Observed problems posting this to Old BIG-IP
+            ### Observed problems posting this to Old BIG-IP; Investigate
             if configDict.get('serviceDownImmediateAction'):
                 del configDict['serviceDownImmediateAction']
             if configDict.get('rulesReference'):
@@ -539,25 +530,14 @@ if args.copy or args.write:
         virtualConfig = []
         if virtual in sourceVirtualSet:
             print ('Virtual(s) to copy: %s' % (virtual))
-            #sourceVirtualConfig = get_virtual(virtual)
             sourceVirtual['virtualFullPath'] = virtual
             sourceVirtual['virtualListConfig'] = get_virtual(virtual)
             virtualsList.append(sourceVirtual)
-            #if virtual not in destinationVirtualSet:
-            #    print('Copying virtual: %s' % (virtual))
-            #    copy_virtual(virtual)
-            #else:
-            #    print('Virtual: %s already present on destination' % (virtual))
         elif virtual in sourceVirtualDict.keys():
             print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
             sourceVirtual['virtualFullPath'] = sourceVirtualDict[virtual]
             sourceVirtual['virtualListConfig'] = get_virtual(sourceVirtualDict[virtual])
             virtualsList.append(sourceVirtual)
-            #if sourceVirtualDict[virtual] not in destinationVirtualSet:
-            #    print ('Virtual(s) to copy: %s' % (sourceVirtualDict[virtual]))
-            #    copy_virtual(sourceVirtualDict[virtual])
-            #else:
-            #    print('Virtual: %s already present on destination' % (virtual))
         else:
             print ('Virtual: %s not found on source BIG-IP' % (virtual))
     theData['virtuals'] = virtualsList
@@ -585,6 +565,5 @@ if args.copy or args.read:
         else:
             quit()
     virtualsList = theData['virtuals']
-    #print json.dumps(virtualsList, indent=4, sort_keys=True)
     for virtual in virtualsList:
         put_virtual(virtual['virtualFullPath'], virtual['virtualListConfig'])
