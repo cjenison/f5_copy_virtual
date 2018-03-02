@@ -23,6 +23,7 @@ from collections import OrderedDict
 
 datagroupkeywords = ['equals', 'starts_with', 'ends_with', 'contains']
 filestorebasepath = '/config/filestore/files_d'
+contentTypeJsonHeader = {'Content-Type': 'application/json'}
 
 #Setup command line arguments using Python argparse
 parser = argparse.ArgumentParser(description='A tool to move a BIG-IP LTM Virtual Server from one BIG-IP to another', epilog="Note that this utility only validates that destination object [e.g. a pool] exists or not on target system; if target object is found, it doesn't modify it")
