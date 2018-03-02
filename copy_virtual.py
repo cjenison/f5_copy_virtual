@@ -216,13 +216,19 @@ def get_virtual(virtualFullPath):
     #virtualProfiles = sourcebip.get('%s/ltm/virtual/%s/profiles' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
     virtualProfiles = virtualDict['profilesReference']
     if virtualProfiles.get('items'):
+        index = 0
+        badProfiles = []
         for profile in virtualProfiles['items']:
             print('Profile: %s' % (profile['fullPath']))
             if profile['fullPath'] in sourceAsmBotdefenseProfiles and not sourceProfileTypeDict.has_key(profile['fullPath']):
                 print ('Found Reference to magic ASM profile')
-                virtualConfig.append(get_asm_botdefense_profile(profile['fullPath']))
+                badProfiles.append(index)
+                #virtualConfig.append(get_asm_botdefense_profile(profile['fullPath']))
             else:
                 virtualConfig.append(get_profile(profile['fullPath']))
+            index += 1
+        for profileIndex in badProfiles:
+            del virtualProfiles['items'][profileIndex]
     if virtualDict.get('persist'):
         hasPrimaryPersistence = True
         primaryPersistence = virtualDict['persist']
@@ -252,6 +258,8 @@ def put_json(fullPath, configDict):
     #print('kind: %s' % (configDict['kind']))
     if configDict['kind'] == 'tm:asm:custom:asmpolicy':
         put_asm_policy(configDict['policyId'], configDict['policyName'], configDict['xmlPolicy'])
+    elif configDict['kind'] == 'tm:security:bot-defense:asm-profile:asm-profilestate':
+        print ('Not putting special ASM bot-defense profile: %s' % (configDict['fullPath']))
     else:
         objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
         postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
