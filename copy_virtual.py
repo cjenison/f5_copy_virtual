@@ -207,6 +207,9 @@ def get_virtual(virtualFullPath):
         virtualConfig.append(get_asm_policy(sourceAsmPolicyIdNameDict[virtualFullPath]['id'], sourceAsmPolicyIdNameDict[virtualFullPath]['name'], sourceAsmPolicyIdNameDict[virtualFullPath]['fullPath']))
     if virtualDict.get('pool'):
         virtualConfig.append(get_pool(virtualDict['pool']))
+    if virtualDict.get('securityLogProfilesReference'):
+        for logProfileReference in virtualDict['securityLogProfilesReference']:
+            virtualConfig.append(get_logProfile(logProfileReference['link']))
     if virtualDict.get('sourceAddressTranslation').get('pool'):
         virtualConfig.append(get_snatpool(virtualDict['sourceAddressTranslation']['pool']))
     virtualPolicies = virtualDict['policiesReference']
@@ -388,6 +391,10 @@ def get_key(keyFullPath):
 def get_asm_botdefense_profile(fullPath):
     botdefenseProfileDict = sourcebip.get('%s/security/bot-defense/asm-profile/%s' % (sourceurl_base, fullPath.replace("/", "~", 2))).json()
     return botdefenseProfileDict
+
+def get_logProfile(link):
+    logProfileDict = sourcebip.get('%s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
+    return logProfileDict
 
 def get_profile(profileFullPath):
     profileDict = sourcebip.get('%s/ltm/profile/%s/%s' % (sourceurl_base, sourceProfileTypeDict[profileFullPath], profileFullPath.replace("/", "~", 2))).json()
