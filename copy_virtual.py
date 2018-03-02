@@ -88,7 +88,8 @@ def get_system_info(bigip, authHeader):
     bip.verify = False
     bip.headers.update(authHeader)
     globalSettings = bip.get('https://%s/mgmt/tm/sys/global-settings/' % (bigip)).json()
-    hardware = bip.get('https://%s/mgmt/tm/sys/hardware' % (bigip)).json()
+    hardware = bip.get('https://%s/mgmt/tm/sys/hardware/' % (bigip)).json()
+    provision = bip.get('https://%s/mgmt/tm/sys/provision/' % (bigip)).json()
     systemInfo['baseMac'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['baseMac']['description']
     systemInfo['marketingName'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['marketingName']['description']
     volumes = bip.get('https://%s/mgmt/tm/sys/software/volume' % (bigip)).json()
@@ -98,7 +99,9 @@ def get_system_info(bigip, authHeader):
                 activeVersion = volume['version']
     systemInfo['version'] = activeVersion
     systemInfo['hostname'] = globalSettings['hostname']
-    print ('systemInfo: %s' % (json.dumps(systemInfo, indent=4)))
+    systemInfo['provision'] = provision
+    print ('hostname: %s' % (systemInfo['hostname']))
+    print ('version: %s' % (systemInfo['version']))
     return systemInfo
 
 def get_passphrase(profileFullPath):
@@ -275,6 +278,9 @@ def put_json(fullPath, configDict):
                 del configDict['serviceDownImmediateAction']
             if configDict.get('rulesReference'):
                 del configDict['rulesReference']
+            if configDict.get('policiesReference').get('items') and downgrade:
+                print('Downgrading Local Traffic Policies is not supported; removing Policies from Virtual')
+                del configDict['policiesReference']
         elif configDict['kind'] == 'tm:ltm:pool:poolstate':
             for member in configDict['membersReference']['items']:
                 del member['state']
@@ -283,7 +289,12 @@ def put_json(fullPath, configDict):
             if configDict.get('membersReference'):
                 del configDict['membersReference']
         elif configDict['kind'] == 'tm:ltm:policy:policystate':
-            print('Deal with Policies specially based on destination version')
+            if destinationShortVersion >= 12.1:
+                configDict['subPath']='Drafts'
+                configDict['fullPath']='/%s/Drafts/%s' % (configDict['partition'], configDict['name'])
+            if downgrade:
+                print('Moving policies to older software revisions is not supported; policy: %s not copied' % (fullPath))
+                return
         elif configDict['kind'] == 'tm:sys:crypto:cert:certstate':
             if fullPath not in destinationCertSet and not args.nocertandkey:
                 if configDict.get('certText'):
@@ -309,6 +320,15 @@ def put_json(fullPath, configDict):
         print ('Posting to: %s' % (postUrl))
         destinationObjectPost = destinationbip.post(postUrl, headers=destinationPostHeaders, data=json.dumps(configDict))
         if destinationObjectPost.status_code == 200:
+            if configDict['kind'] == 'tm:ltm:policy:policystate' and destinationShortVersion >= 12.1:
+                draftFullPath = '/%s/Drafts/%s' % (configDict['partition'], configDict['name'])
+                publishCommand = {'command':'publish', 'name': draftFullPath}
+                publishPolicy = destinationbip.post('%s/ltm/policy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(publishCommand))
+                if publishPolicy.status_code == 200:
+                    print ('Successully Published Policy: %s' % (fullPath))
+                else:
+                    print ('Unsuccessful Publish of Policy: %s' % (fullPath))
+                    print ('Status Code: - Body: %s' % (publishPolicy.status_code, publishPolicy.content))
             print ('Successfully Posted Object: %s to URL: %s' % (fullPath, postUrl))
         else:
             print ('Unsuccessful Post of Object: %s to URL: %s' % (fullPath, postUrl))
@@ -403,23 +423,7 @@ def get_pool(poolFullPath):
 
 def get_policy(policyFullPath):
     policyDict = sourcebip.get('%s/ltm/policy/%s?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
-    #del policyDict['fullPath']
-    ### with 12.1.x+; policies now have "Drafts" or "Published" status (https://support.f5.com/csp/article/K33749970)
-    ### need to add code to handle this stuff
-    if policyDict.get('status'):
-        print('Our source machine is likely 12.1.x or later')
-    if policyDict.get('controls'):
-        print('Our Source machine may be pre-12.1')
-    #policyDict.getpolicyDict['subPath']='Drafts'
-    #to get policies published on 12.1 or later, gotta put a a subPath of Drafts in
-    virtualDict.append(get_policy_strategy(policyDict['strategy']))
-    #copiedPolicy = destinationbip.post('%s/ltm/policy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(policyJson))
-    rulesDict = policyDict['rulesReference']
-    #draftFullPath = '/%s/Drafts/%s' % (policyFullPath.split("/")[1], policyFullPath.split("/")[2])
-    #print ('draftFullPath: %s' % (draftFullPath))
-    #publishCommand = {'command': "publish", 'name': draftFullPath }
-    #destinationbip.post('%s/ltm/policy' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(publishCommand))
-    print ('Finished getting Policy: %s' % (policyFullPath))
+    virtualConfig.append(get_policy_strategy(policyDict['strategy']))
     return policyDict
 
 def get_policy_strategy(policyStrategyFullPath):
@@ -439,7 +443,8 @@ if args.destinationbigip and (args.copy or args.read):
     destinationbip.headers.update(destinationAuthHeader)
     destinationSystemInfo = get_system_info(args.destinationbigip, destinationAuthHeader)
     destinationVersion = destinationSystemInfo['version']
-    print('Destination BIG-IP Version: %s' % (destinationVersion))
+    print('Destination BIG-IP Hostname: %s' % (destinationSystemInfo['hostname']))
+    print('Destination BIG-IP Software: %s' % (destinationSystemInfo['version']))
     destinationPostHeaders = destinationAuthHeader
     destinationPostHeaders.update(contentTypeJsonHeader)
     destinationCertSet = set()
@@ -465,7 +470,8 @@ if args.sourcebigip and (args.copy or args.write):
     sourcebip.headers.update(sourceAuthHeader)
     sourceSystemInfo = get_system_info(args.sourcebigip, sourceAuthHeader)
     sourceVersion = sourceSystemInfo['version']
-    print('Source BIG-IP Version: %s' % (sourceVersion))
+    print('Source BIG-IP Hostname: %s' % (sourceSystemInfo['hostname']))
+    print('Source BIG-IP Software: %s' % (sourceSystemInfo['version']))
     sourcePostHeaders = sourceAuthHeader
     sourcePostHeaders.update(contentTypeJsonHeader)
 
@@ -517,6 +523,7 @@ if args.sourcebigip and (args.copy or args.write):
 
 theData = dict()
 virtualsList = []
+downgrade = False
 
 if args.copy or args.write:
     theData['version'] = sourceSystemInfo['version']
@@ -574,6 +581,7 @@ if args.copy or args.read:
         downgradeString = 'You are copying configuration data from %s to %s; which is untested and likely to break; proceed?' % (theData['version'], destinationSystemInfo['version'])
         if query_yes_no(downgradeString, default="no"):
             print('Proceeding with caution; errors are likely.')
+            downgrade = True
         else:
             quit()
     virtualsList = theData['virtuals']
