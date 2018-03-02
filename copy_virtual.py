@@ -21,7 +21,7 @@ import getpass
 import paramiko
 from collections import OrderedDict
 
-
+datagroupkeywords = ['equals', 'starts_with', 'ends_with', 'contains']
 filestorebasepath = '/config/filestore/files_d'
 
 #Setup command line arguments using Python argparse
@@ -387,7 +387,26 @@ def get_profile(profileFullPath):
 
 def get_rule(ruleFullPath):
     ruleDict = sourcebip.get('%s/ltm/rule/%s' % (sourceurl_base, ruleFullPath.replace("/", "~", 2))).json()
+    datagroupHits = set()
+    for datagroup in sourceDatagroupSet:
+        if datagroup.split("/")[1] == 'Common':
+            dgName = datagroup.split("/")[2]
+        else:
+            dgName = datagroup
+        for keyword in datagroupkeywords:
+            searchString = '%s %s' % (keyword, dgName)
+            print ('searchString: %s' % (searchString))
+            if searchString in ruleDict['apiAnonymous']:
+                datagroupHits.add(datagroup)
+    for matchedDatagroup in datagroupHits:
+        print('Rule: %s may reference Datagroup: %s' % (ruleDict['fullPath'], matchedDatagroup))
+        virtualConfig.append(get_datagroup(matchedDatagroup))
     return ruleDict
+
+def get_datagroup(datagroupFullPath):
+    print ('datagroupFullPath Argument: %s|' % (datagroupFullPath))
+    datagroupDict = sourcebip.get('%s/ltm/data-group/%s/%s' % (sourceurl_base, sourceDatagroupTypeDict[datagroupFullPath], datagroupFullPath.replace("/", "~", 2))).json()
+    return datagroupDict
 
 def get_persistence(persistenceFullPath):
     persistenceDict = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))).json()
@@ -502,15 +521,19 @@ if args.sourcebigip and (args.copy or args.write):
             sourceVirtualSet.add(virtual['fullPath'])
 
     sourceDatagroupSet = set()
+    sourceDatagroupTypeDict = dict()
     sourceInternalDatagroups = sourcebip.get('%s/ltm/data-group/internal/' % (sourceurl_base)).json()
     if sourceInternalDatagroups.get('items'):
         for datagroup in sourceInternalDatagroups['items']:
             sourceDatagroupSet.add(datagroup['fullPath'])
+            sourceDatagroupTypeDict[datagroup['fullPath']] = 'internal'
 
     sourceExternalDatagroups = sourcebip.get('%s/ltm/data-group/external/' % (sourceurl_base)).json()
     if sourceExternalDatagroups.get('items'):
         for datagroup in sourceExternalDatagroups['items']:
             sourceDatagroupSet.add(datagroup['fullPath'])
+            sourceDatagroupTypeDict[datagroup['fullPath']] = 'external'
+    print('sourceDatagroupTypeDict: %s' % (sourceDatagroupTypeDict))
 
 theData = dict()
 virtualsList = []
