@@ -234,7 +234,14 @@ def get_virtual(virtualFullPath):
     if virtualDict.get('persist'):
         #primaryPersistence = virtualDict['persist']
         #primaryPersistenceFullPath = '/%s/%s' % (virtualDict['persist'][0]['partition'], virtualDict['persist'][0]['name'])
-        virtualConfig.append(get_object_by_link(virtualDict['persist'][0]['nameReference']['link']))
+        if 'nameReference' in virtualDict.get('persist'):
+            print ('Newer System')
+            virtualConfig.append(get_object_by_link(virtualDict['persist'][0]['nameReference']['link']))
+        else:
+            print ('Older System')
+            persistenceFullPath = '/%s/%s' % (virtualDict['persist'][0]['partition'], virtualDict['persist'][0]['name'])
+            print ('persistenceFullPath: %s' % (persistenceFullPath))
+            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/persistence/%s/%s' % (sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))))
     if virtualDict.get('fallbackPersistence'):
         virtualConfig.append(get_object_by_link(virtualDict['fallbackPersistenceReference']['link']))
     if virtualDict.get('rules'):
