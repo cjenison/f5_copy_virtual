@@ -80,6 +80,7 @@ def get_auth_token(bigip, username, passwd):
     payload['loginProviderName'] = 'tmos'
     authurl = 'https://%s/mgmt/shared/authn/login' % bigip
     token = bip.post(authurl, headers=contentTypeJsonHeader, auth=(args.user, passwd), data=json.dumps(payload)).json()['token']['token']
+    print ('Got Auth Token: %s' % (token))
     return token
 
 def get_system_info(bigip, username, password):
@@ -202,7 +203,7 @@ def get_virtual(virtualFullPath):
     if virtualFullPath in sourceAsmVirtualSet:
         virtualConfig.append(get_asm_policy(sourceAsmPolicyIdNameDict[virtualFullPath]['id'], sourceAsmPolicyIdNameDict[virtualFullPath]['name'], sourceAsmPolicyIdNameDict[virtualFullPath]['fullPath']))
     if virtualDict.get('pool'):
-        virtualConfig.append(get_pool(virtualDict['pool']))
+        virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (virtualDict['pool'].replace("/", "~", 2))))
     if virtualDict.get('securityLogProfiles'):
         for logProfileReference in virtualDict['securityLogProfilesReference']:
             virtualConfig.append(get_object_by_link(logProfileReference['link']))
@@ -211,7 +212,7 @@ def get_virtual(virtualFullPath):
     virtualPolicies = virtualDict['policiesReference']
     if virtualPolicies.get('items'):
         for policy in virtualPolicies['items']:
-            virtualConfig.append(get_policy(policy['fullPath']))
+            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/policy/%s' % (policy['fullPath'].replace("/", "~", 2))))
     #virtualProfiles = sourcebip.get('%s/ltm/virtual/%s/profiles' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
     virtualProfiles = virtualDict['profilesReference']
     if virtualProfiles.get('items'):
@@ -237,8 +238,12 @@ def get_virtual(virtualFullPath):
     if virtualDict.get('fallbackPersistence'):
         virtualConfig.append(get_object_by_link(virtualDict['fallbackPersistenceReference']['link']))
     if virtualDict.get('rules'):
-        for ruleReference in virtualDict['rulesReference']:
-            virtualConfig.append(get_object_by_link(ruleReference['link']))
+        if virtualDict.get('rulesReference'):
+            for ruleReference in virtualDict['rulesReference']:
+                virtualConfig.append(get_object_by_link(ruleReference['link']))
+        else:
+            for ruleFullPath in virtualDict['rules']:
+                virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/rule/%s' % (ruleFullPath.replace("/", "~", 2))))
     if args.ipchange:
         changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (virtualDict['destination'].split("/")[2].rsplit(":", 1)[0], virtualDict['destination'].split("/")[2].rsplit(":", 1)[1], virtualDict['mask'])
         if query_yes_no(changeDestination, default="yes"):
@@ -292,6 +297,8 @@ def put_json(fullPath, configDict):
                     del configDict['policiesReference']
             elif configDict['kind'] == 'tm:ltm:pool:poolstate':
                 for member in configDict['membersReference']['items']:
+                    ## Not sure why we need to delete this property, but we do
+                    del member['session']
                     del member['state']
                     del member['ephemeral']
             elif configDict['kind'] == 'tm:ltm:snatpool:snatpoolstate':
@@ -387,12 +394,17 @@ def get_key(keyFullPath):
     return keyDict
 
 def get_object_by_link(link):
-    profileDict = sourcebip.get('%s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
-    if profileDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
+    print ('link to get: %s' % (link))
+    if '/ltm/pool/' in link or '/ltm/policy/' in link:
+        objectDict = sourcebip.get('%s?expandSubcollections=true' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
+    else:
+        objectDict = sourcebip.get('%s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
+    print ('link: %s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0]))
+    if objectDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
         if not args.nocertandkey:
-            cert = get_cert(profileDict['cert'])
-            key = get_key(profileDict['key'])
-            certAndKey = get_cert_and_key(profileDict['cert'], profileDict['key'])
+            cert = get_cert(objectDict['cert'])
+            key = get_key(objectDict['key'])
+            certAndKey = get_cert_and_key(objectDict['cert'], objectDict['key'])
             cert['certText']=certAndKey['cert']['certText']
             key['keyText']=certAndKey['key']['keyText']
             virtualConfig.append(cert)
@@ -400,7 +412,9 @@ def get_object_by_link(link):
         else:
             print('May need to adjust profile reference to default.crt and default.key')
             #alter references in profile to default.crt and default.key
-    elif profileDict['kind'] == 'tm:ltm:rule:rulestate':
+    elif objectDict['kind'] == 'tm:ltm:policy:policystate':
+        virtualConfig.append(get_policy_strategy(objectDict['strategy']))
+    elif objectDict['kind'] == 'tm:ltm:rule:rulestate':
         datagroupHits = set()
         for datagroup in sourceDatagroupSet:
             if datagroup.split("/")[1] == 'Common':
@@ -409,34 +423,43 @@ def get_object_by_link(link):
                 dgName = datagroup
             for keyword in datagroupkeywords:
                 searchString = '%s %s' % (keyword, dgName)
-                if searchString in profileDict['apiAnonymous']:
+                if searchString in objectDict['apiAnonymous']:
                     datagroupHits.add(datagroup)
         for matchedDatagroup in datagroupHits:
-            print('Rule: %s may reference Datagroup: %s' % (profileDict['fullPath'], matchedDatagroup))
+            print('Rule: %s may reference Datagroup: %s' % (objectDict['fullPath'], matchedDatagroup))
             virtualConfig.append(get_datagroup(matchedDatagroup))
-    print('source: %s kind: %s' % (profileDict['fullPath'], profileDict['kind']))
-    return profileDict
+    elif objectDict['kind'] == "tm:ltm:pool:poolstate":
+        if objectDict.get('monitor'):
+            for monitor in objectDict['monitor'].strip().split(' and '):
+                virtualConfig.append(get_monitor(monitor))
+        for member in objectDict['membersReference']['items']:
+            if member['monitor'] != 'default':
+                for monitor in member['monitor'].strip().split(' and '):
+                    virtualConfig.append(get_monitor(monitor))
+
+    print('source: %s kind: %s' % (objectDict['fullPath'], objectDict['kind']))
+    return objectDict
 
 def get_object(profileReference):
-    profileDict = sourcebip.get('%s' % (profileReference['nameReference']['link'].replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
-    print('Profile: %s' % (profileDict['fullPath']))
-    return profileDict
+    objectDict = sourcebip.get('%s' % (profileReference['nameReference']['link'].replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
+    print('Profile: %s' % (objectDict['fullPath']))
+    return objectDict
 
-def get_rule(ruleFullPath):
-    ruleDict = sourcebip.get('%s/ltm/rule/%s' % (sourceurl_base, ruleFullPath.replace("/", "~", 2))).json()
-    for datagroup in sourceDatagroupSet:
-        if datagroup.split("/")[1] == 'Common':
-            dgName = datagroup.split("/")[2]
-        else:
-            dgName = datagroup
-        for keyword in datagroupkeywords:
-            searchString = '%s %s' % (keyword, dgName)
-            if searchString in ruleDict['apiAnonymous']:
-                datagroupHits.add(datagroup)
-    for matchedDatagroup in datagroupHits:
-        print('Rule: %s may reference Datagroup: %s' % (ruleDict['fullPath'], matchedDatagroup))
-        virtualConfig.append(get_datagroup(matchedDatagroup))
-    return ruleDict
+#def get_rule(ruleFullPath):
+#    ruleDict = sourcebip.get('%s/ltm/rule/%s' % (sourceurl_base, ruleFullPath.replace("/", "~", 2))).json()
+#    for datagroup in sourceDatagroupSet:
+#        if datagroup.split("/")[1] == 'Common':
+#            dgName = datagroup.split("/")[2]
+#        else:
+#            dgName = datagroup
+#        for keyword in datagroupkeywords:
+#            searchString = '%s %s' % (keyword, dgName)
+#            if searchString in ruleDict['apiAnonymous']:
+#                datagroupHits.add(datagroup)
+#    for matchedDatagroup in datagroupHits:
+#        print('Rule: %s may reference Datagroup: %s' % (ruleDict['fullPath'], matchedDatagroup))
+#        virtualConfig.append(get_datagroup(matchedDatagroup))
+#    return ruleDict
 
 def get_datagroup(datagroupFullPath):
     datagroupDict = sourcebip.get('%s/ltm/data-group/%s/%s' % (sourceurl_base, sourceDatagroupTypeDict[datagroupFullPath], datagroupFullPath.replace("/", "~", 2))).json()
@@ -454,16 +477,16 @@ def get_snatpool(snatpoolFullPath):
     snatpoolDict = sourcebip.get('%s/ltm/snatpool/%s' % (sourceurl_base, snatpoolFullPath.replace("/", "~", 2))).json()
     return snatpoolDict
 
-def get_pool(poolFullPath):
-    poolDict = sourcebip.get('%s/ltm/pool/%s?expandSubcollections=true' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
-    if poolDict.get('monitor'):
-        for monitor in poolDict['monitor'].strip().split(' and '):
-            virtualConfig.append(get_monitor(monitor))
-        for member in poolDict['membersReference']['items']:
-            if member['monitor'] != 'default':
-                for monitor in member['monitor'].strip().split(' and '):
-                    virtualConfig.append(get_monitor(monitor))
-    return poolDict
+#def get_pool(poolFullPath):
+#    poolDict = sourcebip.get('%s/ltm/pool/%s?expandSubcollections=true' % (sourceurl_base, poolFullPath.replace("/", "~", 2))).json()
+#    if poolDict.get('monitor'):
+#        for monitor in poolDict['monitor'].strip().split(' and '):
+#            virtualConfig.append(get_monitor(monitor))
+#        for member in poolDict['membersReference']['items']:
+#            if member['monitor'] != 'default':
+#                for monitor in member['monitor'].strip().split(' and '):
+#                    virtualConfig.append(get_monitor(monitor))
+#    return poolDict
 
 def get_policy(policyFullPath):
     policyDict = sourcebip.get('%s/ltm/policy/%s?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
