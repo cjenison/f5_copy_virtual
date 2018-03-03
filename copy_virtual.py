@@ -19,7 +19,7 @@ import requests
 import json
 import getpass
 import paramiko
-from collections import OrderedDict
+from time import sleep
 
 datagroupkeywords = ['equals', 'starts_with', 'ends_with', 'contains']
 filestorebasepath = '/config/filestore/files_d'
@@ -48,7 +48,6 @@ parser.add_argument('--noprompt', '-n', help='Do not prompt for confirmation of 
 
 args = parser.parse_args()
 
-contentTypeJsonHeader = {'Content-Type': 'application/json'}
 
 # Taken from http://code.activestate.com/recipes/577058/
 def query_yes_no(question, default="no"):
@@ -117,8 +116,6 @@ def get_passphrase(profileFullPath):
     return passphrase1
 
 def get_cert_and_key(certFullPath, keyFullPath):
-    print('Cert FullPath: %s' % (certFullPath))
-    print('Key FullPath: %s' % (keyFullPath))
     sourcessh = paramiko.SSHClient()
     sourcessh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     sourcessh.connect(args.sourcebigip, username=args.user, password=passwd, allow_agent=False)
@@ -126,27 +123,24 @@ def get_cert_and_key(certFullPath, keyFullPath):
     certFolder = certFullPath.split("/")[1]
     keyFolder = keyFullPath.split("/")[1]
     filestore_basepath = '/config/filestore/files_d/%s_d' % (certFolder)
-    print('filestore_basepath: %s' % (filestore_basepath))
     sourcesftp.chdir('%s/certificate_d' % (filestore_basepath))
     sourceCertFiles = sourcesftp.listdir()
     for file in sourceCertFiles:
         if file.replace(":", "/", 2).startswith(certFullPath):
             certFilestoreName = file
-    print('certFilestoreName: %s' % (certFilestoreName))
     sourcesftp.chdir('%s/certificate_key_d' % (filestore_basepath))
     sourceKeyFiles = sourcesftp.listdir()
     for file in sourceKeyFiles:
         if file.replace(":", "/", 2).startswith(keyFullPath):
             keyFilestoreName = file
-    print('keyFilestoreName: %s' % (certFilestoreName))
     certFileRead = sourcesftp.open('%s/certificate_d/%s' % (filestore_basepath, certFilestoreName), 'r')
     certFile = certFileRead.read()
-    print('certFile: %s' % (certFile))
     certFileRead.close()
     keyFileRead = sourcesftp.open('%s/certificate_key_d/%s' % (filestore_basepath, keyFilestoreName), 'r')
     keyFile = keyFileRead.read()
-    print('keyFile: %s' % (keyFile))
     keyFileRead.close()
+    print('Cert: %s' % (certFullPath))
+    print('Key: %s' % (keyFullPath))
     certWithKey = {'cert': {'fullPath': certFullPath, 'certText': certFile}, 'key': {'fullPath': keyFullPath, 'keyText': keyFile}}
     return certWithKey
 
@@ -204,8 +198,13 @@ def put_key(fullPath, keyText):
 
 def get_virtual(virtualFullPath):
     virtualDict = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
+    if virtualFullPath in sourceAsmVirtualSet:
+        virtualConfig.append(get_asm_policy(sourceAsmPolicyIdNameDict[virtualFullPath]['id'], sourceAsmPolicyIdNameDict[virtualFullPath]['name'], sourceAsmPolicyIdNameDict[virtualFullPath]['fullPath']))
     if virtualDict.get('pool'):
         virtualConfig.append(get_pool(virtualDict['pool']))
+    if virtualDict.get('securityLogProfiles'):
+        for logProfileReference in virtualDict['securityLogProfilesReference']:
+            virtualConfig.append(get_object_by_link(logProfileReference['link']))
     if virtualDict.get('sourceAddressTranslation').get('pool'):
         virtualConfig.append(get_snatpool(virtualDict['sourceAddressTranslation']['pool']))
     virtualPolicies = virtualDict['policiesReference']
@@ -215,19 +214,27 @@ def get_virtual(virtualFullPath):
     #virtualProfiles = sourcebip.get('%s/ltm/virtual/%s/profiles' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
     virtualProfiles = virtualDict['profilesReference']
     if virtualProfiles.get('items'):
+        index = 0
+        badProfiles = []
+        # Modify below code to do this profile removal on apply, not on read
         for profile in virtualProfiles['items']:
-            print('Profile: %s' % (profile['fullPath']))
-            virtualConfig.append(get_profile(profile['fullPath']))
+            if profile['fullPath'] in sourceAsmBotdefenseProfiles:
+                print ('Found Reference to automagic ASM bot-defense profile on virtual - removing (it gets regenerated when applied)')
+                badProfiles.append(index)
+            else:
+                virtualConfig.append(get_object_by_link(profile['nameReference']['link']))
+            index += 1
+        for profileIndex in badProfiles:
+            del virtualProfiles['items'][profileIndex]
     if virtualDict.get('persist'):
-        hasPrimaryPersistence = True
-        primaryPersistence = virtualDict['persist']
-        primaryPersistenceFullPath = '/%s/%s' % (virtualDict['persist'][0]['partition'], virtualDict['persist'][0]['name'])
-        virtualConfig.append(get_persistence(primaryPersistenceFullPath))
+        #primaryPersistence = virtualDict['persist']
+        #primaryPersistenceFullPath = '/%s/%s' % (virtualDict['persist'][0]['partition'], virtualDict['persist'][0]['name'])
+        virtualConfig.append(get_object_by_link(virtualDict['persist'][0]['nameReference']['link']))
     if virtualDict.get('fallbackPersistence'):
-        virtualConfig.append(get_persistence(virtualDict['fallbackPersistence']))
+        virtualConfig.append(get_object_by_link(virtualDict['fallbackPersistenceReference']['link']))
     if virtualDict.get('rules'):
-        for rule in virtualDict['rules']:
-            virtualConfig.append(get_rule(rule))
+        for ruleReference in virtualDict['rulesReference']:
+            virtualConfig.append(get_object_by_link(ruleReference['link']))
     if args.ipchange:
         changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (virtualDict['destination'].split("/")[2].rsplit(":", 1)[0], virtualDict['destination'].split("/")[2].rsplit(":", 1)[1], virtualDict['mask'])
         if query_yes_no(changeDestination, default="yes"):
@@ -236,6 +243,7 @@ def get_virtual(virtualFullPath):
             virtualDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
             virtualDict['mask'] = newDestination['mask']
     virtualConfig.append(virtualDict)
+    print ('Virtual: %s' % (virtualDict['fullPath']))
     return virtualConfig
 
 def put_virtual(virtualFullPath, virtualConfigArray):
@@ -245,87 +253,92 @@ def put_virtual(virtualFullPath, virtualConfigArray):
 
 def put_json(fullPath, configDict):
     #print('kind: %s' % (configDict['kind']))
-    objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
-    postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
-    print ('objectUrl: %s' % (objectUrl))
-    destinationObjectGet = destinationbip.get(objectUrl)
-    if destinationObjectGet.status_code == 200:
-        print('config object: %s already on destination; leaving in place' % (fullPath))
-    elif destinationObjectGet.status_code == 404:
-        if configDict['kind'] == 'tm:ltm:virtual:virtualstate':
-            if args.ipchange:
-                changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
-                if query_yes_no(changeDestination, default="yes"):
-                    newDestination = obtain_new_vs_destination(configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
-                    destinationPartition = configDict['destination'].split("/")[1]
-                    configDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
-                    configDict['mask'] = newDestination['mask']
-                    print ('New Destination: %s - port: %s mask: %s' % (newDestination['ip'], newDestination['port'], newDestination['mask']))
-            if args.disableondestination:
-                if configDict.get('enabled'):
-                    del configDict['enabled']
-                configDict['disabled'] = True
-            ### Observed problems posting this to Old BIG-IP; Investigate
-            if configDict.get('serviceDownImmediateAction'):
-                del configDict['serviceDownImmediateAction']
-            if configDict.get('rulesReference'):
-                del configDict['rulesReference']
-            if configDict.get('policiesReference').get('items') and downgrade:
-                print('Downgrading Local Traffic Policies is not supported; removing Policies from Virtual')
-                del configDict['policiesReference']
-        elif configDict['kind'] == 'tm:ltm:pool:poolstate':
-            for member in configDict['membersReference']['items']:
-                del member['state']
-                del member['ephemeral']
-        elif configDict['kind'] == 'tm:ltm:snatpool:snatpoolstate':
-            if configDict.get('membersReference'):
-                del configDict['membersReference']
-        elif configDict['kind'] == 'tm:ltm:policy:policystate':
-            if destinationShortVersion >= 12.1:
-                configDict['subPath']='Drafts'
-                configDict['fullPath']='/%s/Drafts/%s' % (configDict['partition'], configDict['name'])
-            if downgrade:
-                print('Moving policies to older software revisions is not supported; policy: %s not copied' % (fullPath))
-                return
-        elif configDict['kind'] == 'tm:sys:crypto:cert:certstate':
-            if fullPath not in destinationCertSet and not args.nocertandkey:
-                if configDict.get('certText'):
-                    put_cert(configDict['fullPath'], configDict['certText'])
-        elif configDict['kind'] == 'tm:sys:crypto:key:keystate':
-            if fullPath not in destinationKeySet and not args.nocertandkey:
-                if configDict.get('keyText'):
-                    put_key(configDict['fullPath'], configDict['keyText'])
-        elif configDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
-            ### FIX BELOW TO Handle CertkeyChain properly
-            if configDict.get('certKeyChain'):
-                del configDict['certKeyChain']
-            if configDict['cert'] not in destinationCertSet or configDict['key'] not in destinationKeySet:
-                print('cert: %s and/or key: %s missing on destination - altering cert/key references to default.crt/default.key')
-                configDict['cert'] = '/Common/default.crt'
-                configDict['key'] = '/Common/default.crt'
-            else:
-                if configDict.get('passphrase'):
-                    print('Source client-ssl profile: %s contains encrypted passphrase; need to re-obtain passphrase')
-                    print('**Note: passphrases are encrypted on BIG-IP using Secure Vault technology')
-                    print('**Note: passphrase will be submitted via iControl REST, but will be immediately encrypted on BIG-IP')
-                    configDict['passphrase'] = get_passphrase(configDict['fullPath'])
-        print ('Posting to: %s' % (postUrl))
-        destinationObjectPost = destinationbip.post(postUrl, headers=destinationPostHeaders, data=json.dumps(configDict))
-        if destinationObjectPost.status_code == 200:
-            if configDict['kind'] == 'tm:ltm:policy:policystate' and destinationShortVersion >= 12.1:
-                draftFullPath = '/%s/Drafts/%s' % (configDict['partition'], configDict['name'])
-                publishCommand = {'command':'publish', 'name': draftFullPath}
-                publishPolicy = destinationbip.post('%s/ltm/policy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(publishCommand))
-                if publishPolicy.status_code == 200:
-                    print ('Successully Published Policy: %s' % (fullPath))
+    if configDict['kind'] == 'tm:asm:custom:asmpolicy':
+        put_asm_policy(configDict['policyId'], configDict['policyName'], configDict['xmlPolicy'])
+    elif configDict['kind'] == 'tm:security:bot-defense:asm-profile:asm-profilestate':
+        print ('Not putting special ASM bot-defense profile: %s' % (configDict['fullPath']))
+    else:
+        objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
+        postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
+        print ('objectUrl: %s' % (objectUrl))
+        destinationObjectGet = destinationbip.get(objectUrl)
+        if destinationObjectGet.status_code == 200:
+            print('config object: %s already on destination; leaving in place' % (fullPath))
+        elif destinationObjectGet.status_code == 404:
+            if configDict['kind'] == 'tm:ltm:virtual:virtualstate':
+                if args.ipchange:
+                    changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
+                    if query_yes_no(changeDestination, default="yes"):
+                        newDestination = obtain_new_vs_destination(configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
+                        destinationPartition = configDict['destination'].split("/")[1]
+                        configDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
+                        configDict['mask'] = newDestination['mask']
+                        print ('New Destination: %s - port: %s mask: %s' % (newDestination['ip'], newDestination['port'], newDestination['mask']))
+                if args.disableondestination:
+                    if configDict.get('enabled'):
+                        del configDict['enabled']
+                    configDict['disabled'] = True
+                ### Observed problems posting this to Old BIG-IP; Investigate
+                if configDict.get('serviceDownImmediateAction'):
+                    del configDict['serviceDownImmediateAction']
+                if configDict.get('rulesReference'):
+                    del configDict['rulesReference']
+                if configDict.get('policiesReference').get('items') and downgrade:
+                    print('Downgrading Local Traffic Policies is not supported; removing Policies from Virtual')
+                    del configDict['policiesReference']
+            elif configDict['kind'] == 'tm:ltm:pool:poolstate':
+                for member in configDict['membersReference']['items']:
+                    del member['state']
+                    del member['ephemeral']
+            elif configDict['kind'] == 'tm:ltm:snatpool:snatpoolstate':
+                if configDict.get('membersReference'):
+                    del configDict['membersReference']
+            elif configDict['kind'] == 'tm:ltm:policy:policystate':
+                if destinationShortVersion >= 12.1:
+                    configDict['subPath']='Drafts'
+                    configDict['fullPath']='/%s/Drafts/%s' % (configDict['partition'], configDict['name'])
+                if downgrade:
+                    print('Moving policies to older software revisions is not supported; policy: %s not copied' % (fullPath))
+                    return
+            elif configDict['kind'] == 'tm:sys:crypto:cert:certstate':
+                if fullPath not in destinationCertSet and not args.nocertandkey:
+                    if configDict.get('certText'):
+                        put_cert(configDict['fullPath'], configDict['certText'])
+            elif configDict['kind'] == 'tm:sys:crypto:key:keystate':
+                if fullPath not in destinationKeySet and not args.nocertandkey:
+                    if configDict.get('keyText'):
+                        put_key(configDict['fullPath'], configDict['keyText'])
+            elif configDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
+                ### FIX BELOW TO Handle CertkeyChain properly
+                if configDict.get('certKeyChain'):
+                    del configDict['certKeyChain']
+                if configDict['cert'] not in destinationCertSet or configDict['key'] not in destinationKeySet:
+                    print('cert: %s and/or key: %s missing on destination - altering cert/key references to default.crt/default.key')
+                    configDict['cert'] = '/Common/default.crt'
+                    configDict['key'] = '/Common/default.crt'
                 else:
-                    print ('Unsuccessful Publish of Policy: %s' % (fullPath))
-                    print ('Status Code: - Body: %s' % (publishPolicy.status_code, publishPolicy.content))
-            print ('Successfully Posted Object: %s to URL: %s' % (fullPath, postUrl))
-        else:
-            print ('Unsuccessful Post of Object: %s to URL: %s' % (fullPath, postUrl))
-            print ('Payload: %s' % (json.dumps(configDict)))
-            print ('Status Code: %s - Body: %s' % (destinationObjectPost.status_code, destinationObjectPost.content))
+                    if configDict.get('passphrase'):
+                        print('Source client-ssl profile: %s contains encrypted passphrase; need to re-obtain passphrase')
+                        print('**Note: passphrases are encrypted on BIG-IP using Secure Vault technology')
+                        print('**Note: passphrase will be submitted via iControl REST, but will be immediately encrypted on BIG-IP')
+                        configDict['passphrase'] = get_passphrase(configDict['fullPath'])
+            print ('Posting to: %s' % (postUrl))
+            destinationObjectPost = destinationbip.post(postUrl, headers=destinationPostHeaders, data=json.dumps(configDict))
+            if destinationObjectPost.status_code == 200:
+                if configDict['kind'] == 'tm:ltm:policy:policystate' and destinationShortVersion >= 12.1:
+                    draftFullPath = '/%s/Drafts/%s' % (configDict['partition'], configDict['name'])
+                    publishCommand = {'command':'publish', 'name': draftFullPath}
+                    publishPolicy = destinationbip.post('%s/ltm/policy/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(publishCommand))
+                    if publishPolicy.status_code == 200:
+                        print ('Successully Published Policy: %s' % (fullPath))
+                    else:
+                        print ('Unsuccessful Publish of Policy: %s' % (fullPath))
+                        print ('Status Code: - Body: %s' % (publishPolicy.status_code, publishPolicy.content))
+                print ('Successfully Posted Object: %s to URL: %s' % (fullPath, postUrl))
+            else:
+                print ('Unsuccessful Post of Object: %s to URL: %s' % (fullPath, postUrl))
+                print ('Payload: %s' % (json.dumps(configDict)))
+                print ('Status Code: %s - Body: %s' % (destinationObjectPost.status_code, destinationObjectPost.content))
 
 def obtain_new_vs_destination(destination, port, mask):
     changeDestination = 'Destination: %s - Change?' % (destination)
@@ -369,10 +382,9 @@ def get_key(keyFullPath):
     keyDict = sourcebip.get('%s/sys/crypto/key/%s' % (sourceurl_base, keyFullPath.replace("/", "~", 2))).json()
     return keyDict
 
-def get_profile(profileFullPath):
-    profileDict = sourcebip.get('%s/ltm/profile/%s/%s' % (sourceurl_base, sourceProfileTypeDict[profileFullPath], profileFullPath.replace("/", "~", 2))).json()
-    if sourceProfileTypeDict[profileFullPath] == 'client-ssl':
-        print('Profile: %s is client-ssl' % (profileFullPath))
+def get_object_by_link(link):
+    profileDict = sourcebip.get('%s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
+    if profileDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
         if not args.nocertandkey:
             cert = get_cert(profileDict['cert'])
             key = get_key(profileDict['key'])
@@ -384,11 +396,30 @@ def get_profile(profileFullPath):
         else:
             print('May need to adjust profile reference to default.crt and default.key')
             #alter references in profile to default.crt and default.key
+    elif profileDict['kind'] == 'tm:ltm:rule:rulestate':
+        datagroupHits = set()
+        for datagroup in sourceDatagroupSet:
+            if datagroup.split("/")[1] == 'Common':
+                dgName = datagroup.split("/")[2]
+            else:
+                dgName = datagroup
+            for keyword in datagroupkeywords:
+                searchString = '%s %s' % (keyword, dgName)
+                if searchString in profileDict['apiAnonymous']:
+                    datagroupHits.add(datagroup)
+        for matchedDatagroup in datagroupHits:
+            print('Rule: %s may reference Datagroup: %s' % (profileDict['fullPath'], matchedDatagroup))
+            virtualConfig.append(get_datagroup(matchedDatagroup))
+    print('source: %s kind: %s' % (profileDict['fullPath'], profileDict['kind']))
+    return profileDict
+
+def get_object(profileReference):
+    profileDict = sourcebip.get('%s' % (profileReference['nameReference']['link'].replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
+    print('Profile: %s' % (profileDict['fullPath']))
     return profileDict
 
 def get_rule(ruleFullPath):
     ruleDict = sourcebip.get('%s/ltm/rule/%s' % (sourceurl_base, ruleFullPath.replace("/", "~", 2))).json()
-    datagroupHits = set()
     for datagroup in sourceDatagroupSet:
         if datagroup.split("/")[1] == 'Common':
             dgName = datagroup.split("/")[2]
@@ -396,7 +427,6 @@ def get_rule(ruleFullPath):
             dgName = datagroup
         for keyword in datagroupkeywords:
             searchString = '%s %s' % (keyword, dgName)
-            print ('searchString: %s' % (searchString))
             if searchString in ruleDict['apiAnonymous']:
                 datagroupHits.add(datagroup)
     for matchedDatagroup in datagroupHits:
@@ -405,7 +435,6 @@ def get_rule(ruleFullPath):
     return ruleDict
 
 def get_datagroup(datagroupFullPath):
-    print ('datagroupFullPath Argument: %s|' % (datagroupFullPath))
     datagroupDict = sourcebip.get('%s/ltm/data-group/%s/%s' % (sourceurl_base, sourceDatagroupTypeDict[datagroupFullPath], datagroupFullPath.replace("/", "~", 2))).json()
     return datagroupDict
 
@@ -440,6 +469,55 @@ def get_policy(policyFullPath):
 def get_policy_strategy(policyStrategyFullPath):
     policyStrategyDict = sourcebip.get('%s/ltm/policy-strategy/%s' % (sourceurl_base, policyStrategyFullPath.replace("/", "~", 2))).json()
     return policyStrategyDict
+
+def policy_upload_with_range(filename, xmlPolicy):
+    chunk_size = 512 * 1024
+    fileUploadHeader = {'Content-Type': 'application/octet-stream'}
+    fileUploadHeader.update(destinationAuthHeader)
+    fileSize = len(xmlPolicy)
+    while True:
+        print ('Uploading Files')
+
+def put_asm_policy(policyId, policyName, xmlPolicy):
+    #policyUpload = destinationbip.post('https://%s/mgmt/tm/asm/file-transfer/uploads/%s.xml' % (args.destinationbigip, policyName), headers=fileUploadHeader, data=xmlPolicy )
+    #print ('policyUpload Response: %s' % (policyUpload.content))
+    #print ('policyUploadResponse: %s' % (policyUpload.content))
+    policyImportPayload = {'file': xmlPolicy, 'status': 'NEW' }
+    importPolicyTask = destinationbip.post('https://%s/mgmt/tm/asm/tasks/import-policy' % (args.destinationbigip), headers=destinationPostHeaders, data=json.dumps(policyImportPayload)).json()
+    taskId = importPolicyTask['id']
+    print ('upload taskId: %s' % (taskId))
+    taskDone = False
+    while not taskDone:
+        task = destinationbip.get('https://%s/mgmt/tm/asm/tasks/import-policy/%s' % (args.destinationbigip, taskId)).json()
+        if task['status'] == 'COMPLETED':
+            taskDone = True
+        else:
+            print ('Policy Import Task Not Done - sleeping 2 seconds')
+            sleep(2)
+    print ('taskId: %s' % (taskId))
+    #print ('importPolicyResponse: %s' % (importPolicyTask.content))
+
+def get_asm_policy(policyId, policyName, policyFullPath):
+    policyDict={ 'policyId': policyId, 'policyName': policyName, 'kind':'tm:asm:custom:asmpolicy', 'fullPath': policyFullPath }
+    exportPolicyTaskPayload = dict()
+    policyLink = {'link': 'https://localhost/mgmt/tm/asm/policies/%s' % policyId}
+    exportPolicyTaskPayload['filename']='%s.xml' % (policyId)
+    exportPolicyTaskPayload['policyReference']=policyLink
+    policyTaskPost = sourcebip.post('https://%s/mgmt/tm/asm/tasks/export-policy' % (args.sourcebigip), headers=sourcePostHeaders, data=json.dumps(exportPolicyTaskPayload)).json()
+    taskId = policyTaskPost['id']
+    taskDone = False
+    while not taskDone:
+        task = sourcebip.get('https://%s/mgmt/tm/asm/tasks/export-policy/%s' % (args.sourcebigip, taskId)).json()
+        if task['status'] == 'COMPLETED':
+            taskDone = True
+        else:
+            print ('Policy Export Task Not Done - sleeping 2 seconds')
+            sleep(2)
+    retrieveXmlPolicy = sourcebip.get('https://%s/mgmt/tm/asm/file-transfer/downloads/%s.xml' % (args.sourcebigip, policyId))
+    #with open('%s.xml' % (policyId), 'w') as xmlOut:
+    #    xmlOut.write(retrieveXmlPolicy.content)
+    policyDict['xmlPolicy']=retrieveXmlPolicy.content
+    return policyDict
 
 user = args.user
 passwd = getpass.getpass("Password for " + user + ":")
@@ -486,14 +564,12 @@ if args.sourcebigip and (args.copy or args.write):
     sourcePostHeaders = sourceAuthHeader
     sourcePostHeaders.update(contentTypeJsonHeader)
 
-    sourceProfileTypeDict = dict()
-    sourceProfiles = sourcebip.get('%s/ltm/profile/' % (sourceurl_base)).json()
-    for profile in sourceProfiles['items']:
-        typeUrlFragment = profile['reference']['link'].split("/")[-1].split("?")[0]
-        profileTypeCollection = sourcebip.get('%s/ltm/profile/%s' % (sourceurl_base, typeUrlFragment)).json()
-        if profileTypeCollection.get('items'):
-            for profile in profileTypeCollection['items']:
-                sourceProfileTypeDict[profile['fullPath']] = typeUrlFragment
+    sourceAsmBotdefenseProfiles = set()
+    botdefenseProfiles = sourcebip.get('%s/security/bot-defense/asm-profile/' % (sourceurl_base))
+    if botdefenseProfiles.status_code == 200:
+        botdefenseProfilesDict = json.loads(botdefenseProfiles.content)
+        for profile in botdefenseProfilesDict['items']:
+            sourceAsmBotdefenseProfiles.add(profile['fullPath'])
 
     sourcePersistenceTypeDict = dict()
     sourcePersistenceProfiles = sourcebip.get('%s/ltm/persistence/' % (sourceurl_base)).json()
@@ -521,6 +597,20 @@ if args.sourcebigip and (args.copy or args.write):
             sourceVirtualDict[virtual['name']] = virtual['fullPath']
             sourceVirtualSet.add(virtual['fullPath'])
 
+    sourceAsmVirtualSet = set()
+    sourceAsmPolicyIdNameDict = dict()
+    sourceAsmPolicies = sourcebip.get('%s/asm/policies' % (sourceurl_base))
+    if sourceAsmPolicies.status_code == 200:
+        sourceAsmPoliciesDict = json.loads(sourceAsmPolicies.content)
+        for policy in sourceAsmPoliciesDict['items']:
+            if policy.get('virtualServers'):
+                for virtual in policy['virtualServers']:
+                   sourceAsmVirtualSet.add(virtual)
+                   sourceAsmPolicyIdNameDict[virtual]= {'id': policy['id'], 'name':policy['name'], 'fullPath':policy['fullPath']}
+
+    #print('sourceAsmVirtualSet: %s' % (sourceAsmVirtualSet))
+    #print('sourceAsmVirtualDict: %s' % (sourceAsmPolicyIdNameDict))
+
     sourceDatagroupSet = set()
     sourceDatagroupTypeDict = dict()
     sourceInternalDatagroups = sourcebip.get('%s/ltm/data-group/internal/' % (sourceurl_base)).json()
@@ -534,7 +624,7 @@ if args.sourcebigip and (args.copy or args.write):
         for datagroup in sourceExternalDatagroups['items']:
             sourceDatagroupSet.add(datagroup['fullPath'])
             sourceDatagroupTypeDict[datagroup['fullPath']] = 'external'
-    print('sourceDatagroupTypeDict: %s' % (sourceDatagroupTypeDict))
+    #print('sourceDatagroupTypeDict: %s' % (sourceDatagroupTypeDict))
 
 theData = dict()
 virtualsList = []
@@ -553,7 +643,7 @@ if args.copy or args.write:
         sourceVirtual = dict()
         virtualConfig = []
         if virtual in sourceVirtualSet:
-            print ('Virtual(s) to copy: %s' % (virtual))
+            #print ('Virtual(s) to copy: %s' % (virtual))
             sourceVirtual['virtualFullPath'] = virtual
             sourceVirtual['virtualListConfig'] = get_virtual(virtual)
             virtualsList.append(sourceVirtual)
