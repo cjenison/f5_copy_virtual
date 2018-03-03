@@ -82,11 +82,12 @@ def get_auth_token(bigip, username, passwd):
     token = bip.post(authurl, headers=contentTypeJsonHeader, auth=(args.user, passwd), data=json.dumps(payload)).json()['token']['token']
     return token
 
-def get_system_info(bigip, authHeader):
+def get_system_info(bigip, username, password):
     systemInfo = dict()
     bip = requests.session()
     bip.verify = False
-    bip.headers.update(authHeader)
+    bip.auth = (username, password)
+    #bip.headers.update(authHeader)
     globalSettings = bip.get('https://%s/mgmt/tm/sys/global-settings/' % (bigip)).json()
     hardware = bip.get('https://%s/mgmt/tm/sys/hardware/' % (bigip)).json()
     provision = bip.get('https://%s/mgmt/tm/sys/provision/' % (bigip)).json()
@@ -222,7 +223,10 @@ def get_virtual(virtualFullPath):
                 print ('Found Reference to automagic ASM bot-defense profile on virtual - removing (it gets regenerated when applied)')
                 badProfiles.append(index)
             else:
-                virtualConfig.append(get_object_by_link(profile['nameReference']['link']))
+                if profile.get('nameReference'):
+                    virtualConfig.append(get_object_by_link(profile['nameReference']['link']))
+                else:
+                    virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/profile/%s/%s' % (sourceProfileTypeDict[profile['fullPath']], profile['fullPath'].replace("/", "~", 2))))
             index += 1
         for profileIndex in badProfiles:
             del virtualProfiles['items'][profileIndex]
@@ -527,11 +531,16 @@ if args.destinationbigip and (args.copy or args.read):
     destinationurl_base = ('https://%s/mgmt/tm' % (args.destinationbigip))
     destinationbip = requests.session()
     destinationbip.verify = False
-    destinationAuthToken = get_auth_token(args.destinationbigip, args.user, passwd)
-    destinationAuthHeader = {'X-F5-Auth-Token': destinationAuthToken}
-    destinationbip.headers.update(destinationAuthHeader)
-    destinationSystemInfo = get_system_info(args.destinationbigip, destinationAuthHeader)
+    destinationSystemInfo = get_system_info(args.destinationbigip, args.user, passwd)
     destinationVersion = destinationSystemInfo['version']
+    destinationShortVersion = float('%s.%s' % (destinationSystemInfo['version'].split(".")[0], destinationSystemInfo['version'].split(".")[1]))
+    destinationAuthHeader = {}
+    if destinationShortVersion >= 11.6:
+        destinationAuthToken = get_auth_token(args.destinationbigip, args.user, passwd)
+        destinationAuthHeader['X-F5-Auth-Token']=destinationAuthToken
+        destinationbip.headers.update(destinationAuthHeader)
+    else:
+        destinationbip.auth = (args.user, passwd)
     print('Destination BIG-IP Hostname: %s' % (destinationSystemInfo['hostname']))
     print('Destination BIG-IP Software: %s' % (destinationSystemInfo['version']))
     destinationPostHeaders = destinationAuthHeader
@@ -554,15 +563,29 @@ if args.sourcebigip and (args.copy or args.write):
     sourceurl_base = ('https://%s/mgmt/tm' % (args.sourcebigip))
     sourcebip = requests.session()
     sourcebip.verify = False
-    sourceAuthToken = get_auth_token(args.sourcebigip, args.user, passwd)
-    sourceAuthHeader = {'X-F5-Auth-Token': sourceAuthToken}
-    sourcebip.headers.update(sourceAuthHeader)
-    sourceSystemInfo = get_system_info(args.sourcebigip, sourceAuthHeader)
+    sourceSystemInfo = get_system_info(args.sourcebigip, args.user, passwd)
     sourceVersion = sourceSystemInfo['version']
+    sourceShortVersion = float('%s.%s' % (sourceSystemInfo['version'].split(".")[0], sourceSystemInfo['version'].split(".")[1]))
+    sourceAuthHeader = {}
+    if sourceShortVersion >= 11.6:
+        sourceAuthToken = get_auth_token(args.sourcebigip, args.user, passwd)
+        sourceAuthHeader['X-F5-Auth-Token']=sourceAuthToken
+        sourcebip.headers.update(sourceAuthHeader)
+    else:
+        sourcebip.auth = (args.user, passwd)
     print('Source BIG-IP Hostname: %s' % (sourceSystemInfo['hostname']))
     print('Source BIG-IP Software: %s' % (sourceSystemInfo['version']))
     sourcePostHeaders = sourceAuthHeader
     sourcePostHeaders.update(contentTypeJsonHeader)
+
+    sourceProfileTypeDict = dict()
+    sourceProfiles = sourcebip.get('%s/ltm/profile/' % (sourceurl_base)).json()
+    for profile in sourceProfiles['items']:
+        typeUrlFragment = profile['reference']['link'].split("/")[-1].split("?")[0]
+        profileTypeCollection = sourcebip.get('%s/ltm/profile/%s' % (sourceurl_base, typeUrlFragment)).json()
+        if profileTypeCollection.get('items'):
+            for profile in profileTypeCollection['items']:
+                sourceProfileTypeDict[profile['fullPath']] = typeUrlFragment
 
     sourceAsmBotdefenseProfiles = set()
     botdefenseProfiles = sourcebip.get('%s/security/bot-defense/asm-profile/' % (sourceurl_base))
