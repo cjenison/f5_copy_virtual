@@ -83,6 +83,33 @@ def get_auth_token(bigip, username, passwd):
     print ('Got Auth Token: %s' % (token))
     return token
 
+def getConfirmedPassword(bigip, username, password):
+    bip = requests.session()
+    bip.verify = False
+    bip.auth = (username, password)
+    credentialsValidated = False
+    while not credentialsValidated:
+        testRequest = bip.get('https://%s/mgmt/tm/sys/' % (bigip))
+        if testRequest.status_code == 200:
+            credentialsValidated = True
+            return password
+        elif testRequest.status_code == 401:
+            print ('Invalid credentials for user %s' % (user))
+            passwordRetryQuery = 'Retry with new password (No to exit)?'
+            if query_yes_no(passwordRetryQuery, default="yes"):
+                password = getpass.getpass('Re-enter Password for %s' % (user))
+                bip.auth = (username, password)
+            else:
+                print('Exiting due to invalid authentication credentials')
+                quit()
+        else:
+            print('Unexpected Error from test request to validate credentials')
+            print('Status Code: %s' % (testRequest.status_code))
+            print('Body: %s' % (testRequest.content))
+            print('Exiting due to unexpected error condition')
+            quit()
+
+
 def get_system_info(bigip, username, password):
     systemInfo = dict()
     bip = requests.session()
@@ -547,23 +574,25 @@ def get_asm_policy(policyId, policyName, policyFullPath):
     return policyDict
 
 user = args.user
-passwd = getpass.getpass("Password for " + user + ":")
+passwd = getpass.getpass('Enter Password for %s:' % (user))
+
 requests.packages.urllib3.disable_warnings()
 
 if args.destinationbigip and (args.copy or args.read):
     destinationurl_base = ('https://%s/mgmt/tm' % (args.destinationbigip))
     destinationbip = requests.session()
     destinationbip.verify = False
-    destinationSystemInfo = get_system_info(args.destinationbigip, args.user, passwd)
+    destpasswd = getConfirmedPassword(args.destinationbigip, user, passwd)
+    destinationSystemInfo = get_system_info(args.destinationbigip, args.user, destpasswd)
     destinationVersion = destinationSystemInfo['version']
     destinationShortVersion = float('%s.%s' % (destinationSystemInfo['version'].split(".")[0], destinationSystemInfo['version'].split(".")[1]))
     destinationAuthHeader = {}
     if destinationShortVersion >= 11.6:
-        destinationAuthToken = get_auth_token(args.destinationbigip, args.user, passwd)
+        destinationAuthToken = get_auth_token(args.destinationbigip, args.user, destpasswd)
         destinationAuthHeader['X-F5-Auth-Token']=destinationAuthToken
         destinationbip.headers.update(destinationAuthHeader)
     else:
-        destinationbip.auth = (args.user, passwd)
+        destinationbip.auth = (args.user, destpasswd)
     print('Destination BIG-IP Hostname: %s' % (destinationSystemInfo['hostname']))
     print('Destination BIG-IP Software: %s' % (destinationSystemInfo['version']))
     destinationPostHeaders = destinationAuthHeader
@@ -586,16 +615,17 @@ if args.sourcebigip and (args.copy or args.write):
     sourceurl_base = ('https://%s/mgmt/tm' % (args.sourcebigip))
     sourcebip = requests.session()
     sourcebip.verify = False
-    sourceSystemInfo = get_system_info(args.sourcebigip, args.user, passwd)
+    sourcepasswd = getConfirmedPassword(args.sourcebigip, user, passwd)
+    sourceSystemInfo = get_system_info(args.sourcebigip, args.user, sourcepasswd)
     sourceVersion = sourceSystemInfo['version']
     sourceShortVersion = float('%s.%s' % (sourceSystemInfo['version'].split(".")[0], sourceSystemInfo['version'].split(".")[1]))
     sourceAuthHeader = {}
     if sourceShortVersion >= 11.6:
-        sourceAuthToken = get_auth_token(args.sourcebigip, args.user, passwd)
+        sourceAuthToken = get_auth_token(args.sourcebigip, args.user, sourcepasswd)
         sourceAuthHeader['X-F5-Auth-Token']=sourceAuthToken
         sourcebip.headers.update(sourceAuthHeader)
     else:
-        sourcebip.auth = (args.user, passwd)
+        sourcebip.auth = (args.user, sourcepasswd)
     print('Source BIG-IP Hostname: %s' % (sourceSystemInfo['hostname']))
     print('Source BIG-IP Software: %s' % (sourceSystemInfo['version']))
     sourcePostHeaders = sourceAuthHeader
