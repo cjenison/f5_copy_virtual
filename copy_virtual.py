@@ -434,6 +434,7 @@ def get_object_by_link(link):
                     datagroupHits.add(datagroup)
         for matchedDatagroup in datagroupHits:
             print('Rule: %s may reference Datagroup: %s' % (objectDict['fullPath'], matchedDatagroup))
+            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/data-group/%s/%s' % (sourceDatagroupTypeDict[matchedDatagroup], matchedDatagroup.replace("/", "~", 2))))
             virtualConfig.append(get_datagroup(matchedDatagroup))
     elif objectDict['kind'] == "tm:ltm:pool:poolstate":
         if objectDict.get('monitor'):
@@ -468,13 +469,13 @@ def get_object(profileReference):
 #        virtualConfig.append(get_datagroup(matchedDatagroup))
 #    return ruleDict
 
-def get_datagroup(datagroupFullPath):
-    datagroupDict = sourcebip.get('%s/ltm/data-group/%s/%s' % (sourceurl_base, sourceDatagroupTypeDict[datagroupFullPath], datagroupFullPath.replace("/", "~", 2))).json()
-    return datagroupDict
+#def get_datagroup(datagroupFullPath):
+#    datagroupDict = sourcebip.get('%s/ltm/data-group/%s/%s' % (sourceurl_base, sourceDatagroupTypeDict[datagroupFullPath], datagroupFullPath.replace("/", "~", 2))).json()
+#    return datagroupDict
 
-def get_persistence(persistenceFullPath):
-    persistenceDict = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))).json()
-    return persistenceDict
+#def get_persistence(persistenceFullPath):
+#    persistenceDict = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))).json()
+#    return persistenceDict
 
 def get_monitor(monitorFullPath):
     monitorDict = sourcebip.get('%s/ltm/monitor/%s/%s' % (sourceurl_base, sourceMonitorTypeDict[monitorFullPath], monitorFullPath.replace("/", "~", 2))).json()
@@ -495,22 +496,14 @@ def get_snatpool(snatpoolFullPath):
 #                    virtualConfig.append(get_monitor(monitor))
 #    return poolDict
 
-def get_policy(policyFullPath):
-    policyDict = sourcebip.get('%s/ltm/policy/%s?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
-    virtualConfig.append(get_policy_strategy(policyDict['strategy']))
-    return policyDict
+#def get_policy(policyFullPath):
+#    policyDict = sourcebip.get('%s/ltm/policy/%s?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
+#    virtualConfig.append(get_policy_strategy(policyDict['strategy']))
+#    return policyDict
 
 def get_policy_strategy(policyStrategyFullPath):
     policyStrategyDict = sourcebip.get('%s/ltm/policy-strategy/%s' % (sourceurl_base, policyStrategyFullPath.replace("/", "~", 2))).json()
     return policyStrategyDict
-
-def policy_upload_with_range(filename, xmlPolicy):
-    chunk_size = 512 * 1024
-    fileUploadHeader = {'Content-Type': 'application/octet-stream'}
-    fileUploadHeader.update(destinationAuthHeader)
-    fileSize = len(xmlPolicy)
-    while True:
-        print ('Uploading Files')
 
 def put_asm_policy(policyId, policyName, xmlPolicy):
     #policyUpload = destinationbip.post('https://%s/mgmt/tm/asm/file-transfer/uploads/%s.xml' % (args.destinationbigip, policyName), headers=fileUploadHeader, data=xmlPolicy )
@@ -608,6 +601,7 @@ if args.sourcebigip and (args.copy or args.write):
     sourcePostHeaders = sourceAuthHeader
     sourcePostHeaders.update(contentTypeJsonHeader)
 
+    # WRAP this in a conditional based on "sourceShortVersion" once I figure out whether profile references in virtual server include nameReference appeared in what version
     sourceProfileTypeDict = dict()
     sourceProfiles = sourcebip.get('%s/ltm/profile/' % (sourceurl_base)).json()
     for profile in sourceProfiles['items']:
