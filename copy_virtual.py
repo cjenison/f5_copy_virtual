@@ -24,6 +24,7 @@ from time import sleep
 datagroupkeywords = ['equals', 'starts_with', 'ends_with', 'contains']
 filestorebasepath = '/config/filestore/files_d'
 contentTypeJsonHeader = {'Content-Type': 'application/json'}
+destinationAsmPolicySet = set()
 
 #Setup command line arguments using Python argparse
 parser = argparse.ArgumentParser(description='A tool to move a BIG-IP LTM Virtual Server from one BIG-IP to another', epilog="Note that this utility only validates that destination object [e.g. a pool] exists or not on target system; if target object is found, it doesn't modify it")
@@ -119,17 +120,16 @@ def get_system_info(bigip, username, password):
     globalSettings = bip.get('https://%s/mgmt/tm/sys/global-settings/' % (bigip)).json()
     hardware = bip.get('https://%s/mgmt/tm/sys/hardware/' % (bigip)).json()
     provision = bip.get('https://%s/mgmt/tm/sys/provision/' % (bigip)).json()
-    provisionedModules = set()
+    provisionedModules = list()
     for module in provision['items']:
         if module['level'] != 'none':
-            provisionedModules.add(module['name'])
+            provisionedModules.append(module['name'])
     print ('Provisioned Modules: %s' % (provisionedModules))
     systemInfo['provisionedModules'] = provisionedModules
     systemInfo['baseMac'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['baseMac']['description']
     systemInfo['marketingName'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['marketingName']['description']
     version = bip.get('https://%s/mgmt/tm/sys/version/' % (bigip)).json()
     systemInfo['version'] = version['entries']['https://localhost/mgmt/tm/sys/version/0']['nestedStats']['entries']['Version']['description']
-    print ('Version: %s' % (systemInfo['version']))
     systemInfo['hostname'] = globalSettings['hostname']
     systemInfo['provision'] = provision
     print ('hostname: %s' % (systemInfo['hostname']))
@@ -299,7 +299,14 @@ def put_virtual(virtualFullPath, virtualConfigArray):
 def put_json(fullPath, configDict):
     #print('kind: %s' % (configDict['kind']))
     if configDict['kind'] == 'tm:asm:custom:asmpolicy':
-        put_asm_policy(configDict['policyId'], configDict['policyName'], configDict['xmlPolicy'])
+        if 'asm' in destinationSystemInfo['provisionedModules']:
+            if fullPath not in destinationAsmPolicySet:
+                put_asm_policy(configDict['policyId'], configDict['policyName'], configDict['xmlPolicy'])
+                destinationAsmPolicySet.add(configDict['fullPath'])
+            else:
+                print('Policy: %s already present on destination BIG-IP' % (fullPath))
+        else:
+            print('BIG-IP ASM not provisioned on destination BIG-IP')
     elif configDict['kind'] == 'tm:security:bot-defense:asm-profile:asm-profilestate':
         print ('Not putting special ASM bot-defense profile: %s' % (configDict['fullPath']))
     else:
@@ -522,7 +529,8 @@ def get_policy_strategy(policyStrategyFullPath):
 def generate_dest_asm_policy_set():
     destinationAsmPolicies = destinationbip.get('%s/asm/policies/' % (destinationurl_base)).json()
     for policy in destinationAsmPolicies['items']:
-        print('policy name: %s' % (policy['name']))
+        #print('policy name: %s; policy fullpath: %s' % (policy['name'], policy['fullPath']))
+        destinationAsmPolicySet.add(policy['fullPath'])
 
 def put_asm_policy(policyId, policyName, xmlPolicy):
     #policyUpload = destinationbip.post('https://%s/mgmt/tm/asm/file-transfer/uploads/%s.xml' % (args.destinationbigip, policyName), headers=fileUploadHeader, data=xmlPolicy )
@@ -596,6 +604,8 @@ if args.destinationbigip and (args.copy or args.read):
     print('Destination BIG-IP Software: %s' % (destinationSystemInfo['version']))
     destinationPostHeaders = destinationAuthHeader
     destinationPostHeaders.update(contentTypeJsonHeader)
+    if 'asm' in destinationData['provisionedModules']:
+        generate_dest_asm_policy_set()
     destinationCertSet = set()
     destinationKeySet = set()
     destinationVirtualSet = set()
@@ -721,7 +731,7 @@ if args.copy or args.write:
         sourceVirtual = dict()
         virtualConfig = []
         if virtual in sourceVirtualSet:
-            #print ('Virtual(s) to copy: %s' % (virtual))
+            print ('Virtual(s) to copy: %s' % (virtual))
             sourceVirtual['virtualFullPath'] = virtual
             sourceVirtual['virtualListConfig'] = get_virtual(virtual)
             virtualsList.append(sourceVirtual)
@@ -731,7 +741,7 @@ if args.copy or args.write:
             sourceVirtual['virtualListConfig'] = get_virtual(sourceVirtualDict[virtual])
             virtualsList.append(sourceVirtual)
         else:
-            print ('Virtual: %s not found on source BIG-IP' % (virtual))
+            print ('Virtual Argument: %s not found; skipping' % (virtual))
     sourceData['virtuals'] = virtualsList
     if args.write:
         with open(args.write, 'w') as fileOut:
@@ -756,11 +766,22 @@ if args.copy or args.read:
             downgrade = True
         else:
             quit()
-    virtualsList = sourceData['virtuals']
-    for virtual in virtualsList:
-        print('virtualFullPath: %s' % (virtual['virtualFullPath']))
-        if args.allvirtuals or virtual['virtualFullPath'] in args.virtual or virtual['virtualFullPath'].split('/')[-1] in args.virtual:
-            print ('We will copy this one: %s' % (virtual['virtualFullPath']))
-            put_virtual(virtual['virtualFullPath'], virtual['virtualListConfig'])
+    for module in set(sourceData['provisionedModules']) - set(destinationData['provisionedModules']):
+        moduleMissingString = 'Module from source not on destination: %s - Continue (no to exit)?' % (module)
+        if query_yes_no(moduleMissingString, default="no"):
+            print('High Possibility of problems due to lack of consitent module provisioning on source and destination')
         else:
-            print ('We will skip this one: %s' % (virtual['virtualFullPath']))
+            quit()
+
+    sourceVirtualsList = sourceData['virtuals']
+    for virtual in sourceVirtualsList:
+        #print('virtualFullPath: %s' % (virtual['virtualFullPath']))
+        if args.allvirtuals or virtual['virtualFullPath'] in args.virtual or virtual['virtualFullPath'].split('/')[-1] in args.virtual:
+            #print ('Virtual to Copy: %s' % (virtual['virtualFullPath']))
+            if virtual['virtualFullPath'] not in destinationVirtualSet:
+                print ('Confirmed Virtual: %s is missing; initiating copy...' % (virtual['virtualFullPath']))
+                put_virtual(virtual['virtualFullPath'], virtual['virtualListConfig'])
+            else:
+                print ('Confirmed Virtual: %s already on destination; skipping virtual' % (virtual['virtualFullPath']))
+        else:
+            print ('Skipping virtual in source data; virtual not selected: %s' % (virtual['virtualFullPath']))
