@@ -262,10 +262,8 @@ def get_virtual(virtualFullPath):
         #primaryPersistence = virtualDict['persist']
         #primaryPersistenceFullPath = '/%s/%s' % (virtualDict['persist'][0]['partition'], virtualDict['persist'][0]['name'])
         if 'nameReference' in virtualDict.get('persist'):
-            print ('Newer System')
             virtualConfig.append(get_object_by_link(virtualDict['persist'][0]['nameReference']['link']))
         else:
-            print ('Older System')
             persistenceFullPath = '/%s/%s' % (virtualDict['persist'][0]['partition'], virtualDict['persist'][0]['name'])
             print ('persistenceFullPath: %s' % (persistenceFullPath))
             virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/persistence/%s/%s' % (sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))))
@@ -451,18 +449,30 @@ def get_object_by_link(link):
     elif objectDict['kind'] == 'tm:ltm:rule:rulestate':
         datagroupHits = set()
         for datagroup in sourceDatagroupSet:
-            if datagroup.split("/")[1] == 'Common':
-                dgName = datagroup.split("/")[2]
-            else:
-                dgName = datagroup
             for keyword in datagroupkeywords:
+                if datagroup.split("/")[1] == 'Common':
+                    dgName = datagroup.split("/")[2]
+                    searchString = '%s %s' % (keyword, dgName)
+                    if searchString in objectDict['apiAnonymous']:
+                        datagroupHits.add(datagroup)
+                dgName = datagroup
                 searchString = '%s %s' % (keyword, dgName)
                 if searchString in objectDict['apiAnonymous']:
                     datagroupHits.add(datagroup)
         for matchedDatagroup in datagroupHits:
             print('Rule: %s may reference Datagroup: %s' % (objectDict['fullPath'], matchedDatagroup))
             virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/data-group/%s/%s' % (sourceDatagroupTypeDict[matchedDatagroup], matchedDatagroup.replace("/", "~", 2))))
-            virtualConfig.append(get_datagroup(matchedDatagroup))
+            #virtualConfig.append(get_datagroup(matchedDatagroup))
+        ifileHits = set()
+        for ifile in sourceIfileSet:
+            if ifile.split("/")[1] == 'Common':
+                ifilename = ifile.split("/")[2]
+                searchString = 'ifile get \"%s\"' % (ifilename)
+                if searchString in objectDict['apiAnonymous']:
+                    ifileHits.add(ifile)
+                    print ('Detected a possible iFile dependency in iRule: %s for ifile: %s [Please resolve this manually]' % (objectDict['fullPath'], ifile))
+        print ('ifileHits: %s' % (ifileHits))
+
     elif objectDict['kind'] == "tm:ltm:pool:poolstate":
         if objectDict.get('monitor'):
             for monitor in objectDict['monitor'].strip().split(' and '):
@@ -685,8 +695,12 @@ if args.sourcebigip and (args.copy or args.write):
                    sourceAsmVirtualSet.add(virtual)
                    sourceAsmPolicyIdNameDict[virtual]= {'id': policy['id'], 'name':policy['name'], 'fullPath':policy['fullPath']}
 
-    #print('sourceAsmVirtualSet: %s' % (sourceAsmVirtualSet))
-    #print('sourceAsmVirtualDict: %s' % (sourceAsmPolicyIdNameDict))
+    sourceIfileSet = set()
+    sourceIfiles = sourcebip.get('%s/ltm/ifile/' % (sourceurl_base)).json()
+    if sourceIfiles.get('items'):
+        for ifile in sourceIfiles['items']:
+            sourceIfileSet.add(ifile['fullPath'])
+    print('sourceIfileSet: %s' % (sourceIfileSet))
 
     sourceDatagroupSet = set()
     sourceDatagroupTypeDict = dict()
