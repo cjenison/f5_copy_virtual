@@ -311,13 +311,6 @@ def put_json(fullPath, configDict):
     elif configDict['kind'] == 'tm:security:bot-defense:asm-profile:asm-profilestate':
         print ('Not putting special ASM bot-defense profile: %s' % (configDict['fullPath']))
     else:
-        if configDict['kind'] == 'tm:ltm:virtual:virtualstate' and args.ipchange:
-            changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
-            if query_yes_no(changeDestination, default="yes"):
-                newDestination = obtain_new_vs_destination(configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
-                destinationPartition = configDict['destination'].split("/")[1]
-                configDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
-                configDict['mask'] = newDestination['mask']
         objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
         postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
         print ('objectUrl: %s' % (objectUrl))
