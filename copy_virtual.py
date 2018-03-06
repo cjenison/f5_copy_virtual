@@ -28,22 +28,23 @@ destinationAsmPolicySet = set()
 
 #Setup command line arguments using Python argparse
 parser = argparse.ArgumentParser(description='A tool to move a BIG-IP LTM Virtual Server from one BIG-IP to another', epilog="Note that this utility only validates that destination object [e.g. a pool] exists or not on target system; if target object is found, it doesn't modify it")
+mode = parser.add_mutually_exclusive_group(required=True)
+mode.add_argument('--copy', '-c', help='Copy from source to destination BIG-IP (online for both systems)', action='store_true')
+mode.add_argument('--get', '-g', help='Get JSON from source and produce file output', action='store_true')
+mode.add_argument('--put', '-p', help='Put JSON file input to Destination BIG-IP', action='store_true')
+virtual = parser.add_mutually_exclusive_group(required=True)
+virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual server(s) to select on source (example: vs-1 or /Public/vs-1)')
+virtual.add_argument('--allvirtuals', '-a', help="Select all virtual servers on source", action='store_true')
 parser.add_argument('--sourcebigip', '-s', help='IP or hostname of Source BIG-IP Management or Self IP')
 parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destination BIG-IP Management or Self IP')
 parser.add_argument('--user', '-u', help='username to use for authentication', required=True)
-virtual = parser.add_mutually_exclusive_group()
-virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual server(s) on source to select (example: vs-1 or /Public/vs-1)')
-virtual.add_argument('--allvirtuals', '-a', help="Select all virtual servers on source system", action='store_true')
-mode = parser.add_mutually_exclusive_group()
-mode.add_argument('--copy', '-c', help='Copy from source to destination BIG-IP (online for both systems)', action='store_true')
-mode.add_argument('--write', '-w', help='Write JSON File Output (provide filename)')
-mode.add_argument('--read', '-r', help='Read JSON File Output and push to Destination BIG-IP (provide filename)')
+parser.add_argument('--file', '-f', help='file for read or write')
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
 parser.add_argument('--destsuffix', help='Use a suffix for configuration objects on destination [do not re-use existing objects already on destination]')
 parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 parser.add_argument('--disableondestination', '-dd', help='Disable Virtual Server on Destination BIG-IP as it is copied', action='store_true')
-parser.add_argument('--nocertandkey', '-nck', help='Do not retrieve or push certs/keys and instead alter reference to default.crt and default.key')
-parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination')
+parser.add_argument('--nocertandkey', '-nck', help='Do not retrieve or push certs/keys and instead alter reference to default.crt and default.key', action='store_true')
+parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 #parser.add_argument('--file', '-f', help='Filename to read or write to')
 parser.add_argument('--noprompt', '-n', help='Do not prompt for confirmation of copying operations', action='store_true')
 
@@ -438,12 +439,14 @@ def get_key(keyFullPath):
     return keyDict
 
 def get_object_by_link(link):
-    print ('link to get: %s' % (link))
+    print ('Getting object: %s' % (link.replace("https://localhost/mgmt/tm", "", 1).split("?")[0]))
     if '/ltm/pool/' in link or '/ltm/policy/' in link:
         objectDict = sourcebip.get('%s?expandSubcollections=true' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
     else:
         objectDict = sourcebip.get('%s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
-    print ('link: %s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0]))
+    if objectDict.get('defaultsFrom'):
+        print ("Detected Profile Inheritance; fetching %s/%s" % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~", 2)))
+        virtualConfig.append(get_object_by_link('%s/%s' % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~", 2))))
     if objectDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
         if not args.nocertandkey:
             cert = get_cert(objectDict['cert'])
@@ -493,8 +496,6 @@ def get_object_by_link(link):
             if member['monitor'] != 'default':
                 for monitor in member['monitor'].strip().split(' and '):
                     virtualConfig.append(get_monitor(monitor))
-
-    print('source: %s kind: %s' % (objectDict['fullPath'], objectDict['kind']))
     return objectDict
 
 def get_object(profileReference):
@@ -585,7 +586,7 @@ passwd = getpass.getpass('Enter Password for %s:' % (user))
 requests.packages.urllib3.disable_warnings()
 
 
-if args.destinationbigip and (args.copy or args.read):
+if args.destinationbigip and (args.copy or args.put):
     destinationurl_base = ('https://%s/mgmt/tm' % (args.destinationbigip))
     destinationbip = requests.session()
     destinationbip.verify = False
@@ -622,7 +623,7 @@ if args.destinationbigip and (args.copy or args.read):
         destinationKeySet.add(key['fullPath'])
 
 
-if args.sourcebigip and (args.copy or args.write):
+if args.sourcebigip and (args.copy or args.get):
     sourceurl_base = ('https://%s/mgmt/tm' % (args.sourcebigip))
     sourcebip = requests.session()
     sourcebip.verify = False
@@ -716,7 +717,7 @@ if args.sourcebigip and (args.copy or args.write):
     if sourceIfiles.get('items'):
         for ifile in sourceIfiles['items']:
             sourceIfileSet.add(ifile['fullPath'])
-    print('sourceIfileSet: %s' % (sourceIfileSet))
+    #print('sourceIfileSet: %s' % (sourceIfileSet))
 
     sourceDatagroupSet = set()
     sourceDatagroupTypeDict = dict()
@@ -736,7 +737,7 @@ if args.sourcebigip and (args.copy or args.write):
 virtualsList = []
 downgrade = False
 
-if args.copy or args.write:
+if args.copy or args.get:
     sourceData['kind'] = 'f5:unofficial:virtual:copy:utility:data'
     if args.virtual is not None:
         virtuals = args.virtual
@@ -746,7 +747,7 @@ if args.copy or args.write:
         sourceVirtual = dict()
         virtualConfig = []
         if virtual in sourceVirtualSet:
-            print ('Virtual(s) to copy: %s' % (virtual))
+            print ('Processing Virtual: %s' % (virtual))
             sourceVirtual['virtualFullPath'] = virtual
             sourceVirtual['virtualListConfig'] = get_virtual(virtual)
             virtualsList.append(sourceVirtual)
@@ -758,16 +759,16 @@ if args.copy or args.write:
         else:
             print ('Virtual Argument: %s not found; skipping' % (virtual))
     sourceData['virtuals'] = virtualsList
-    if args.write:
-        with open(args.write, 'w') as fileOut:
+    if args.get:
+        with open(args.file, 'w') as fileOut:
             json.dump(sourceData, fileOut, indent=4, sort_keys=True)
 
 
 
-if args.copy or args.read:
-    if args.read:
-        print('Reading Virtual Config Data from file: %s' % (args.read))
-        with open(args.read, 'r') as fileIn:
+if args.copy or args.put:
+    if args.put:
+        print('Reading Virtual Config Data from file: %s' % (args.put))
+        with open(args.file, 'r') as fileIn:
             sourceData = json.load(fileIn)
     elif args.copy:
         print ('Copy Mode: beginning copy of virtuals to destination')
@@ -784,7 +785,7 @@ if args.copy or args.read:
     for module in set(sourceData['provisionedModules']) - set(destinationData['provisionedModules']):
         moduleMissingString = 'Module from source not on destination: %s - Continue (no to exit)?' % (module)
         if query_yes_no(moduleMissingString, default="no"):
-            print('High Possibility of problems due to lack of consitent module provisioning on source and destination')
+            print('High Possibility of problems due to lack of consistent module provisioning on source and destination')
         else:
             quit()
 
