@@ -327,8 +327,7 @@ def put_json(fullPath, configDict):
                 if configDict.get('rulesReference'):
                     del configDict['rulesReference']
                 if configDict.get('policiesReference').get('items') and downgrade:
-                    print('Downgrading Local Traffic Policies is not supported; removing Policies from Virtual')
-                    del configDict['policiesReference']
+                    print('Downgrading Local Traffic Policies can be problematic; proceeding with best effort')
             elif configDict['kind'] == 'tm:ltm:pool:poolstate':
                 for member in configDict['membersReference']['items']:
                     if destinationShortVersion < 11.6:
@@ -348,19 +347,22 @@ def put_json(fullPath, configDict):
                     if configDict.get('lastModified'):
                         del configDict['lastModified']
                     if destinationShortVersion < 12.1:
-                        del configDict['status']
+                        try:
+                            del configDict['status']
+                            del configDict['references']
+                        except KeyError, e:
+                            pass
                     for rule in configDict['rulesReference']['items']:
                         print ('Rule: %s' % (rule['name']))
                         for action in rule['actionsReference']['items']:
                             print ('Action: %s' % (action['name']))
-                            try:
-                                expirySecs = action['expireSecs']
-                                if expirySecs == None:
-                                    del action['expirySecs']
-                                else:
-                                    print('Apparent use of expirySecs in policy rule action; unable to downgrade')
-                            except KeyError, e:
-                                return
+                            for actionProperty in ['expirySecs', 'length', 'timeout', 'offset', 'connection', 'shutdown']:
+                                if downgrade and float(destinationShortVersion) < 12.1:
+                                    try:
+                                        del action[actionProperty]
+                                        print('Apparent use of %s in policy rule action; unable to downgrade' % (actionProperty))
+                                    except KeyError, e:
+                                        pass
                     print ('Attempting Downgrading of policy')
                     #print('Moving policies to older software revisions is not supported; policy: %s not copied' % (fullPath))
                     #return
@@ -372,42 +374,25 @@ def put_json(fullPath, configDict):
                     print('cert: %s and/or key: %s missing on destination - altering cert/key references to default.crt/default.key')
                     configDict['cert'] = '/Common/default.crt'
                     configDict['key'] = '/Common/default.crt'
-                if configDict.get('sessionMirroring') and destinationShortVersion < 12.0:
-                    del configDict['sessionMirroring']
-                if configDict.get('allowExpiredCrl') and destinationShortVersion < 12.0:
-                    del configDict['allowExpiredCrl']
-                if configDict.get('sessionTicketTimeout') and destinationShortVersion < 12.0:
-                    try:
-                        del configDict['sessionTicketTimeout']
-                    except:
-                        print('ARGH')
-                if configDict.get('maxActiveHandshakes') and destinationShortVersion < 12.1:
-                    del configDict['maxActiveHandshakes']
-                if configDict.get('allowDynamicRecordSizing') and destinationShortVersion < 12.1:
-                    del configDict['allowDynamicRecordSizing']
-                if configDict.get('bypassOnClientCertFail') and destinationShortVersion < 13.0:
-                    del configDict['bypassOnClientCertFail']
-                if configDict.get('bypassOnHandshakeAlert') and destinationShortVersion < 13.0:
-                    del configDict['bypassOnHandshakeAlert']
-                if configDict.get('notifyCertStatusToVirtualServer') and destinationShortVersion < 13.0:
-                    del configDict['notifyCertStatusToVirtualServer']
-                if configDict.get('maxRenegotiationsPerMinute') and destinationShortVersion < 11.6:
-                    del configDict['maxRenegotiationsPerMinute']
-                if configDict.get('maxAggregateRenegotiationPerMinute') and destinationShortVersion < 11.6:
-                    del configDict['maxAggregateRenegotiationPerMinute']
-                if configDict.get('proxySslPassthrough') and destinationShortVersion < 11.6:
-                    del configDict['proxySslPassthrough']
-                if configDict.get('ocspStapling') and destinationShortVersion < 11.6:
-                    del configDict['ocspStapling']
-                if configDict.get('sslC3d'):
-                    if downgrade:
-                        del configDict['sslC3d']
-                else:
-                    if configDict.get('passphrase'):
-                        print('Source client-ssl profile: %s contains encrypted passphrase; need to re-obtain passphrase')
-                        print('**Note: passphrases are encrypted on BIG-IP using Secure Vault technology')
-                        print('**Note: passphrase will be submitted via iControl REST, but will be immediately encrypted on BIG-IP')
-                        configDict['passphrase'] = get_passphrase(configDict['fullPath'])
+                if downgrade:
+                    sslVersionProperties = dict()
+                    sslVersionProperties['13.1'] = ['c3dOcsp', 'sslC3d', 'c3dDropUnknownOcspStatus']
+                    sslVersionProperties['13.0'] = ['cipherGroup', 'bypassOnClientCertFail', 'bypassOnHandshakeAlert', 'notifyCertStatusToVirtualServer']
+                    sslVersionProperties['12.1'] = ['maxActiveHandshakes', 'allowDynamicRecordSizing', 'maximumRecordSize']
+                    sslVersionProperties['12.0'] = ['sessionMirroring', 'allowExpiredCrl', 'sessionTicketTimeout']
+                    sslVersionProperties['11.6'] = ['ocspStapling', 'peerNoRenegotiateTimeout', 'maxRenegotiationsPerMinute', 'maxAggregateRenegotiationPerMinute', 'proxySslPassthrough']
+                    for version in sslVersionProperties.keys():
+                        if destinationShortVersion < float(version):
+                            for property in sslVersionProperties[version]:
+                                try:
+                                    del configDict[property]
+                                except:
+                                    pass
+                if configDict.get('passphrase'):
+                    print('Source client-ssl profile: %s contains encrypted passphrase; need to re-obtain passphrase')
+                    print('**Note: passphrases are encrypted on BIG-IP using Secure Vault technology')
+                    print('**Note: passphrase will be submitted via iControl REST, but will be immediately encrypted on BIG-IP')
+                    configDict['passphrase'] = get_passphrase(configDict['fullPath'])
             print ('Posting to: %s' % (postUrl))
             destinationObjectPost = destinationbip.post(postUrl, headers=destinationPostHeaders, data=json.dumps(configDict))
             if destinationObjectPost.status_code == 200:
@@ -422,6 +407,10 @@ def put_json(fullPath, configDict):
                         print ('Status Code: - Body: %s' % (publishPolicy.status_code, publishPolicy.content))
                 print ('Successfully Posted Object: %s to URL: %s' % (fullPath, postUrl))
             else:
+                if configDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate' and destinationObjectPost.status_code == 400 and 'Error reading key PEM' in destinationObjectPost.content:
+                    passphraseWrongString = 'Passphrase incorrect for key: %s in client-ssl profile: %s - Retry Password Entry?' % (configDict['key'], fullPath)
+                    if query_yes_no(passphraseWrongString, default="yes"):
+                        put_json(fullPath, configDict)
                 print ('Unsuccessful Post of Object: %s to URL: %s' % (fullPath, postUrl))
                 print ('Payload: %s' % (json.dumps(configDict)))
                 print ('Status Code: %s - Body: %s' % (destinationObjectPost.status_code, destinationObjectPost.content))
@@ -469,6 +458,8 @@ def get_cert_or_key(cryptoFullPath, type):
             if cryptoObject['fullPath'] == cryptoFullPath:
                 cryptoDict = cryptoObject
                 break
+    print ('Getting object: %s' % (cryptoDict['selfLink'].replace("https://localhost/mgmt/tm", "", 1).split("?")[0]))
+    print('Getting %s: %s' % (type, cryptoFullPath))
     return cryptoDict
 
 def get_key(keyFullPath):
@@ -486,7 +477,7 @@ def get_object_by_link(link):
         virtualConfig.append(get_object_by_link('%s/%s' % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~"))))
     if objectDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
         if not args.nocertandkey:
-            print('Copying client-ssl profile: %s - Cert: %s - Key: %s' % (objectDict['name'], objectDict['cert'], objectDict['key']))
+            print('Getting client-ssl profile: %s - Cert: %s - Key: %s' % (objectDict['name'], objectDict['cert'], objectDict['key']))
             cert = get_cert_or_key(objectDict['cert'], 'cert')
             key = get_cert_or_key(objectDict['key'], 'key')
             certAndKey = get_cert_and_key_text(objectDict['cert'], objectDict['key'])
@@ -524,7 +515,6 @@ def get_object_by_link(link):
                 if searchString in objectDict['apiAnonymous']:
                     ifileHits.add(ifile)
                     print ('Detected a possible iFile dependency in iRule: %s for ifile: %s [Please resolve this manually]' % (objectDict['fullPath'], ifile))
-        print ('ifileHits: %s' % (ifileHits))
 
     elif objectDict['kind'] == "tm:ltm:pool:poolstate":
         if objectDict.get('monitor'):
