@@ -1,24 +1,18 @@
 #!/usr/bin/python
-
+# Home: https://github.com/cjenison/f5_copy_virtual/
 # copy_virtual.py
 # Author: Chad Jenison (c.jenison at f5.com)
-# Version 1.0
-# Version 1.1 - Significant paring down due to expandSubcollections usage; added support for IP change of virtual as it is copied
-# Version 2.0 - Major changes to support offline operation, using JSON file as storage
 #
 # Script that attempts to move a virtual (and all supporting configuration) from one BIG-IP to another
-# Medium Term To-Do: Try to Handle Missing Cert/Keys by copying with scp
-# Medium Term To-Do: Enumerate Datagroups and diff source/destination - determine if irule text shows any string matches for named datagroups in the diff and prompt user for whether datagroups should be copied
-# Long Term To-Do: Ensure Target Partition/Folder is in place; optionally allow movement of configuration objects from a source partition to a different target partition (including supporting objects)
-# Possible Bugs: if a pool needs to be created on target system and nodes already exist (or there is same IP, differently named), will things break?
-# Confirmed Bug: IPv6 incompatible for IP change (due to split(":") line)
 
 import argparse
 import sys
 import requests
 import json
 import getpass
-import paramiko
+# Note that inside function definitions, paramiko is imported; this is done because paramiko is only needed for SSL cert/key retrieval/sending
+# Some people may struggle with use of paramiko module as it has to be built
+#import paramiko
 from time import sleep
 
 datagroupkeywords = ['equals', 'starts_with', 'ends_with', 'contains']
@@ -111,6 +105,15 @@ def getConfirmedPassword(bigip, username, password):
             print('Exiting due to unexpected error condition')
             quit()
 
+def get_folders(bigip, username, password):
+    bip = requests.session()
+    bip.verify = False
+    bip.auth = (username, password)
+    folders = list()
+    folderCollection = bip.get('https://%s/mgmt/tm/sys/folder/' % (bigip)).json()
+    for folder in folderCollection['items']:
+        folders.append(folder['fullPath'])
+    return folders
 
 def get_system_info(bigip, username, password):
     systemInfo = dict()
@@ -120,8 +123,16 @@ def get_system_info(bigip, username, password):
     #bip.headers.update(authHeader)
     globalSettings = bip.get('https://%s/mgmt/tm/sys/global-settings/' % (bigip)).json()
     hardware = bip.get('https://%s/mgmt/tm/sys/hardware/' % (bigip)).json()
-    provision = bip.get('https://%s/mgmt/tm/sys/provision/' % (bigip)).json()
+    partitions = list()
+    partitionCollection = bip.get('https://%s/mgmt/tm/auth/partition/' % (bigip)).json()
+    for partition in partitionCollection['items']:
+        partitions.append(partition['fullPath'])
+    systemInfo['partitions'] = partitions
+    print ('Partitions: %s' % (systemInfo['partitions']))
+    systemInfo['folders'] = get_folders(bigip, username, password)
+    print ('Folders: %s' % (systemInfo['folders']))
     provisionedModules = list()
+    provision = bip.get('https://%s/mgmt/tm/sys/provision/' % (bigip)).json()
     for module in provision['items']:
         if module.get('level'):
             if module['level'] != 'none':
@@ -158,6 +169,7 @@ def get_passphrase(profileFullPath):
     return passphrase1
 
 def get_cert_and_key(certFullPath, keyFullPath):
+    import paramiko
     sourcessh = paramiko.SSHClient()
     sourcessh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     sourcessh.connect(args.sourcebigip, username=args.user, password=passwd, allow_agent=False)
@@ -168,12 +180,12 @@ def get_cert_and_key(certFullPath, keyFullPath):
     sourcesftp.chdir('%s/certificate_d' % (filestore_basepath))
     sourceCertFiles = sourcesftp.listdir()
     for file in sourceCertFiles:
-        if file.replace(":", "/", 2).startswith(certFullPath):
+        if file.replace(":", "/").startswith(certFullPath):
             certFilestoreName = file
     sourcesftp.chdir('%s/certificate_key_d' % (filestore_basepath))
     sourceKeyFiles = sourcesftp.listdir()
     for file in sourceKeyFiles:
-        if file.replace(":", "/", 2).startswith(keyFullPath):
+        if file.replace(":", "/").startswith(keyFullPath):
             keyFilestoreName = file
     certFileRead = sourcesftp.open('%s/certificate_d/%s' % (filestore_basepath, certFilestoreName), 'r')
     certFile = certFileRead.read()
@@ -187,6 +199,7 @@ def get_cert_and_key(certFullPath, keyFullPath):
     return certWithKey
 
 def put_cert(fullPath, certText):
+    import paramiko
     destinationssh = paramiko.SSHClient()
     destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
@@ -194,13 +207,13 @@ def put_cert(fullPath, certText):
     destinationsftp.chdir('/tmp/')
     destinationsftp.mkdir('_copy_virtual')
     destinationsftp.chdir('_copy_virtual')
-    certFileWrite = destinationsftp.open(fullPath.replace("/", ":", 2), 'w')
+    certFileWrite = destinationsftp.open(fullPath.replace("/", ":"), 'w')
     certFileWrite.write(certText)
     certFileWrite.close()
     certPostPayload = {}
     certPostPayload['command']='install'
     certPostPayload['name']=fullPath
-    certPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":", 2))
+    certPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":"))
     certPost = destinationbip.post('%s/sys/crypto/cert' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(certPostPayload))
     if certPost.status_code == 200:
         print('Successfully Posted Cert: %s to destination BIG-IP' % (fullPath))
@@ -208,11 +221,12 @@ def put_cert(fullPath, certText):
     else:
         print('Unsuccessful attempt to post cert: %s to destination with JSON: %s' % (fullPath, certPostPayload))
         print('Body: %s' % (certPost.content))
-    destinationsftp.remove(fullPath.replace("/", ":", 2))
+    destinationsftp.remove(fullPath.replace("/", ":"))
     destinationsftp.rmdir('/tmp/_copy_virtual')
     destinationsftp.close()
 
 def put_key(fullPath, keyText):
+    import paramiko
     destinationssh = paramiko.SSHClient()
     destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
@@ -220,13 +234,13 @@ def put_key(fullPath, keyText):
     destinationsftp.chdir('/tmp/')
     destinationsftp.mkdir('_copy_virtual')
     destinationsftp.chdir('_copy_virtual')
-    keyFileWrite = destinationsftp.open(fullPath.replace("/", ":", 2), 'w')
+    keyFileWrite = destinationsftp.open(fullPath.replace("/", ":"), 'w')
     keyFileWrite.write(keyText)
     keyFileWrite.close()
     keyPostPayload = {}
     keyPostPayload['command']='install'
     keyPostPayload['name']=fullPath
-    keyPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":", 2))
+    keyPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":"))
     keyPost = destinationbip.post('%s/sys/crypto/key' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(keyPostPayload))
     if keyPost.status_code == 200:
         print('Successfully Posted Key: %s to destination BIG-IP' % (fullPath))
@@ -234,16 +248,17 @@ def put_key(fullPath, keyText):
     else:
         print('Unsuccessful attempt to post key: %s to destination with JSON: %s' % (fullPath, keyPostPayload))
         print('Body: %s' % (keyPost.content))
-    destinationsftp.remove(fullPath.replace("/", ":", 2))
+    destinationsftp.remove(fullPath.replace("/", ":"))
     destinationsftp.rmdir('/tmp/_copy_virtual')
     destinationsftp.close()
 
+
 def get_virtual(virtualFullPath):
-    virtualDict = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
+    virtualDict = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~"))).json()
     if virtualFullPath in sourceAsmVirtualSet:
         virtualConfig.append(get_asm_policy(sourceAsmPolicyIdNameDict[virtualFullPath]['id'], sourceAsmPolicyIdNameDict[virtualFullPath]['name'], sourceAsmPolicyIdNameDict[virtualFullPath]['fullPath']))
     if virtualDict.get('pool'):
-        virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (virtualDict['pool'].replace("/", "~", 2))))
+        virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (virtualDict['pool'].replace("/", "~"))))
     if virtualDict.get('securityLogProfiles'):
         for logProfileReference in virtualDict['securityLogProfilesReference']:
             virtualConfig.append(get_object_by_link(logProfileReference['link']))
@@ -252,8 +267,8 @@ def get_virtual(virtualFullPath):
     virtualPolicies = virtualDict['policiesReference']
     if virtualPolicies.get('items'):
         for policy in virtualPolicies['items']:
-            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/policy/%s' % (policy['fullPath'].replace("/", "~", 2))))
-    #virtualProfiles = sourcebip.get('%s/ltm/virtual/%s/profiles' % (sourceurl_base, virtualFullPath.replace("/", "~", 2))).json()
+            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/policy/%s' % (policy['fullPath'].replace("/", "~"))))
+    #virtualProfiles = sourcebip.get('%s/ltm/virtual/%s/profiles' % (sourceurl_base, virtualFullPath.replace("/", "~"))).json()
     virtualProfiles = virtualDict['profilesReference']
     if virtualProfiles.get('items'):
         index = 0
@@ -267,7 +282,7 @@ def get_virtual(virtualFullPath):
                 if profile.get('nameReference'):
                     virtualConfig.append(get_object_by_link(profile['nameReference']['link']))
                 else:
-                    virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/profile/%s/%s' % (sourceProfileTypeDict[profile['fullPath']], profile['fullPath'].replace("/", "~", 2))))
+                    virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/profile/%s/%s' % (sourceProfileTypeDict[profile['fullPath']], profile['fullPath'].replace("/", "~"))))
             index += 1
         for profileIndex in badProfiles:
             del virtualProfiles['items'][profileIndex]
@@ -279,7 +294,7 @@ def get_virtual(virtualFullPath):
         else:
             persistenceFullPath = '/%s/%s' % (virtualDict['persist'][0]['partition'], virtualDict['persist'][0]['name'])
             print ('persistenceFullPath: %s' % (persistenceFullPath))
-            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/persistence/%s/%s' % (sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))))
+            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/persistence/%s/%s' % (sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~"))))
     if virtualDict.get('fallbackPersistence'):
         virtualConfig.append(get_object_by_link(virtualDict['fallbackPersistenceReference']['link']))
     if virtualDict.get('rules'):
@@ -288,7 +303,7 @@ def get_virtual(virtualFullPath):
                 virtualConfig.append(get_object_by_link(ruleReference['link']))
         else:
             for ruleFullPath in virtualDict['rules']:
-                virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/rule/%s' % (ruleFullPath.replace("/", "~", 2))))
+                virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/rule/%s' % (ruleFullPath.replace("/", "~"))))
     virtualConfig.append(virtualDict)
     print ('Virtual: %s' % (virtualDict['fullPath']))
     return virtualConfig
@@ -312,7 +327,7 @@ def put_json(fullPath, configDict):
     elif configDict['kind'] == 'tm:security:bot-defense:asm-profile:asm-profilestate':
         print ('Not putting special ASM bot-defense profile: %s' % (configDict['fullPath']))
     else:
-        objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
+        objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~"))
         postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
         print ('objectUrl: %s' % (objectUrl))
         destinationObjectGet = destinationbip.get(objectUrl)
@@ -431,11 +446,11 @@ def obtain_new_vs_destination(destination, port, mask):
     return destination
 
 def get_cert(certFullPath):
-    certDict = sourcebip.get('%s/sys/crypto/cert/%s' % (sourceurl_base, certFullPath.replace("/", "~", 2))).json()
+    certDict = sourcebip.get('%s/sys/crypto/cert/%s' % (sourceurl_base, certFullPath.replace("/", "~"))).json()
     return certDict
 
 def get_key(keyFullPath):
-    keyDict = sourcebip.get('%s/sys/crypto/key/%s' % (sourceurl_base, keyFullPath.replace("/", "~", 2))).json()
+    keyDict = sourcebip.get('%s/sys/crypto/key/%s' % (sourceurl_base, keyFullPath.replace("/", "~"))).json()
     return keyDict
 
 def get_object_by_link(link):
@@ -445,8 +460,8 @@ def get_object_by_link(link):
     else:
         objectDict = sourcebip.get('%s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
     if objectDict.get('defaultsFrom'):
-        print ("Detected Profile Inheritance; fetching %s/%s" % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~", 2)))
-        virtualConfig.append(get_object_by_link('%s/%s' % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~", 2))))
+        print ("Detected Profile Inheritance; fetching %s/%s" % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~")))
+        virtualConfig.append(get_object_by_link('%s/%s' % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~"))))
     if objectDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
         if not args.nocertandkey:
             cert = get_cert(objectDict['cert'])
@@ -476,7 +491,7 @@ def get_object_by_link(link):
                     datagroupHits.add(datagroup)
         for matchedDatagroup in datagroupHits:
             print('Rule: %s may reference Datagroup: %s' % (objectDict['fullPath'], matchedDatagroup))
-            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/data-group/%s/%s' % (sourceDatagroupTypeDict[matchedDatagroup], matchedDatagroup.replace("/", "~", 2))))
+            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/data-group/%s/%s' % (sourceDatagroupTypeDict[matchedDatagroup], matchedDatagroup.replace("/", "~"))))
             #virtualConfig.append(get_datagroup(matchedDatagroup))
         ifileHits = set()
         for ifile in sourceIfileSet:
@@ -504,28 +519,28 @@ def get_object(profileReference):
     return objectDict
 
 #def get_datagroup(datagroupFullPath):
-#    datagroupDict = sourcebip.get('%s/ltm/data-group/%s/%s' % (sourceurl_base, sourceDatagroupTypeDict[datagroupFullPath], datagroupFullPath.replace("/", "~", 2))).json()
+#    datagroupDict = sourcebip.get('%s/ltm/data-group/%s/%s' % (sourceurl_base, sourceDatagroupTypeDict[datagroupFullPath], datagroupFullPath.replace("/", "~"))).json()
 #    return datagroupDict
 
 #def get_persistence(persistenceFullPath):
-#    persistenceDict = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~", 2))).json()
+#    persistenceDict = sourcebip.get('%s/ltm/persistence/%s/%s' % (sourceurl_base, sourcePersistenceTypeDict[persistenceFullPath], persistenceFullPath.replace("/", "~"))).json()
 #    return persistenceDict
 
 def get_monitor(monitorFullPath):
-    monitorDict = sourcebip.get('%s/ltm/monitor/%s/%s' % (sourceurl_base, sourceMonitorTypeDict[monitorFullPath], monitorFullPath.replace("/", "~", 2))).json()
+    monitorDict = sourcebip.get('%s/ltm/monitor/%s/%s' % (sourceurl_base, sourceMonitorTypeDict[monitorFullPath], monitorFullPath.replace("/", "~"))).json()
     return monitorDict
 
 def get_snatpool(snatpoolFullPath):
-    snatpoolDict = sourcebip.get('%s/ltm/snatpool/%s' % (sourceurl_base, snatpoolFullPath.replace("/", "~", 2))).json()
+    snatpoolDict = sourcebip.get('%s/ltm/snatpool/%s' % (sourceurl_base, snatpoolFullPath.replace("/", "~"))).json()
     return snatpoolDict
 
 #def get_policy(policyFullPath):
-#    policyDict = sourcebip.get('%s/ltm/policy/%s?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~", 2))).json()
+#    policyDict = sourcebip.get('%s/ltm/policy/%s?expandSubcollections=true' % (sourceurl_base, policyFullPath.replace("/", "~"))).json()
 #    virtualConfig.append(get_policy_strategy(policyDict['strategy']))
 #    return policyDict
 
 def get_policy_strategy(policyStrategyFullPath):
-    policyStrategyDict = sourcebip.get('%s/ltm/policy-strategy/%s' % (sourceurl_base, policyStrategyFullPath.replace("/", "~", 2))).json()
+    policyStrategyDict = sourcebip.get('%s/ltm/policy-strategy/%s' % (sourceurl_base, policyStrategyFullPath.replace("/", "~"))).json()
     return policyStrategyDict
 
 def generate_dest_asm_policy_set():
@@ -542,12 +557,12 @@ def put_asm_policy(policyId, policyName, xmlPolicy):
     if 'asm' in destinationData['provisionedModules']:
         print ('we have ASM')
         policyImportPayload = {'file': xmlPolicy, 'status': 'NEW' }
-        importPolicyTask = destinationbip.post('https://%s/mgmt/tm/asm/tasks/import-policy' % (args.destinationbigip), headers=destinationPostHeaders, data=json.dumps(policyImportPayload)).json()
+        importPolicyTask = destinationbip.post('%s/asm/tasks/import-policy' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(policyImportPayload)).json()
         taskId = importPolicyTask['id']
         print ('upload taskId: %s' % (taskId))
         taskDone = False
         while not taskDone:
-            task = destinationbip.get('https://%s/mgmt/tm/asm/tasks/import-policy/%s' % (args.destinationbigip, taskId)).json()
+            task = destinationbip.get('%s/asm/tasks/import-policy/%s' % (destinationurl_base, taskId)).json()
         if task['status'] == 'COMPLETED':
             taskDone = True
         else:
@@ -580,6 +595,24 @@ def get_asm_policy(policyId, policyName, policyFullPath):
     policyDict['xmlPolicy']=retrieveXmlPolicy.content
     return policyDict
 
+def create_folder(fullPath):
+    createFolderPayload = {'name' : fullPath}
+    folderPost = destinationbip.post('%s/sys/folder/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(createFolderPayload))
+    if folderPost.status_code == 200:
+        print('Created folder: %s' % (fullPath))
+    else:
+        print('Creation of folder: %s - FAILED' % (fullPath))
+        print('Response: %s' % (folderPost.content))
+
+def create_partition(name):
+    createPartitionPayload = {'name' : name}
+    partitionPost = destinationbip.post('%s/auth/partition/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(createPartitionPayload))
+    if partitionPost.status_code == 200:
+        print('Created partition: %s' % (name))
+    else:
+        print('Creation of partition: %s - FAILED' % (name))
+        print('Response: %s' % (partitionPost.content))
+
 user = args.user
 passwd = getpass.getpass('Enter Password for %s:' % (user))
 
@@ -608,16 +641,16 @@ if args.destinationbigip and (args.copy or args.put):
     destinationPostHeaders.update(contentTypeJsonHeader)
     if 'asm' in destinationData['provisionedModules']:
         generate_dest_asm_policy_set()
-    destinationCertSet = set()
-    destinationKeySet = set()
     destinationVirtualSet = set()
     destinationVirtuals = destinationbip.get('%s/ltm/virtual/' % (destinationurl_base)).json()
     if destinationVirtuals.get('items'):
         for virtual in destinationVirtuals['items']:
             destinationVirtualSet.add(virtual['fullPath'])
+    destinationCertSet = set()
     destinationCerts = destinationbip.get('%s/sys/crypto/cert/' % (destinationurl_base)).json()
     for cert in destinationCerts['items']:
         destinationCertSet.add(cert['fullPath'])
+    destinationKeySet = set()
     destinationKeys = destinationbip.get('%s/sys/crypto/key/' % (destinationurl_base)).json()
     for key in destinationKeys['items']:
         destinationKeySet.add(key['fullPath'])
@@ -788,6 +821,24 @@ if args.copy or args.put:
             print('High Possibility of problems due to lack of consistent module provisioning on source and destination')
         else:
             quit()
+
+    # Need to account for missing partitions on destination BIG-IP First - partition will hold string like "Common" (no parantheses)
+    for partition in set(sourceData['partitions']) - set(destinationData['partitions']):
+        partitionMissingString = 'Partition from source not on destination: %s - Create Partition?' % (partition)
+        if query_yes_no(partitionMissingString, default="yes"):
+            create_partition(partition)
+            destinationData['folders'] = get_folders(args.destinationbigip, username, password)
+        else:
+            print('Proceeding without creation of partition: %s' % (partition))
+
+    # Creation of a Partition (e.g. Public) creates a top level folder (e.g. /Public) but you can also have folders inside any "partition" folder (e.g. /Common/qa or /Public/qa)
+    # Creation of a partition will require regeneration of partition list for machine
+    for folder in sorted(set(sourceData['folders']) - set(destinationData['folders'])):
+        folderMissingString = 'Folder from source not on destination: %s - Create Folder?' % (folder)
+        if query_yes_no(folderMissingString, default="yes"):
+            create_folder(folder)
+        else:
+            print('Proceeding without creation of folder: %s' % (folder))
 
     sourceVirtualsList = sourceData['virtuals']
     for virtual in sourceVirtualsList:
