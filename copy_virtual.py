@@ -128,9 +128,7 @@ def get_system_info(bigip, username, password):
     for partition in partitionCollection['items']:
         partitions.append(partition['fullPath'])
     systemInfo['partitions'] = partitions
-    print ('Partitions: %s' % (systemInfo['partitions']))
     systemInfo['folders'] = get_folders(bigip, username, password)
-    print ('Folders: %s' % (systemInfo['folders']))
     provisionedModules = list()
     provision = bip.get('https://%s/mgmt/tm/sys/provision/' % (bigip)).json()
     for module in provision['items']:
@@ -284,7 +282,7 @@ def put_virtual(virtualFullPath, virtualConfigArray):
 def put_json(fullPath, configDict):
     #print('kind: %s' % (configDict['kind']))
     if configDict['kind'] == 'tm:asm:custom:asmpolicy':
-        if 'asm' in destinationSystemInfo['provisionedModules']:
+        if 'asm' in destinationData['provisionedModules']:
             if fullPath not in destinationAsmPolicySet:
                 put_asm_policy(configDict['policyId'], configDict['policyName'], configDict['xmlPolicy'])
                 destinationAsmPolicySet.add(configDict['fullPath'])
@@ -333,6 +331,8 @@ def put_json(fullPath, configDict):
                     del configDict['policiesReference']
             elif configDict['kind'] == 'tm:ltm:pool:poolstate':
                 for member in configDict['membersReference']['items']:
+                    if destinationShortVersion < 11.6:
+                        del member['fqdn']
                     ## Not sure why we need to delete this property, but we do
                     del member['session']
                     del member['state']
@@ -345,8 +345,25 @@ def put_json(fullPath, configDict):
                     configDict['subPath']='Drafts'
                     configDict['fullPath']='/%s/Drafts/%s' % (configDict['partition'], configDict['name'])
                 if downgrade:
-                    print('Moving policies to older software revisions is not supported; policy: %s not copied' % (fullPath))
-                    return
+                    if configDict.get('lastModified'):
+                        del configDict['lastModified']
+                    if destinationShortVersion < 12.1:
+                        del configDict['status']
+                    for rule in configDict['rulesReference']['items']:
+                        print ('Rule: %s' % (rule['name']))
+                        for action in rule['actionsReference']['items']:
+                            print ('Action: %s' % (action['name']))
+                            try:
+                                expirySecs = action['expireSecs']
+                                if expirySecs == None:
+                                    del action['expirySecs']
+                                else:
+                                    print('Apparent use of expirySecs in policy rule action; unable to downgrade')
+                            except KeyError, e:
+                                return
+                    print ('Attempting Downgrading of policy')
+                    #print('Moving policies to older software revisions is not supported; policy: %s not copied' % (fullPath))
+                    #return
             elif configDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
                 ### FIX BELOW TO Handle CertkeyChain properly
                 if configDict.get('certKeyChain'):
@@ -355,6 +372,36 @@ def put_json(fullPath, configDict):
                     print('cert: %s and/or key: %s missing on destination - altering cert/key references to default.crt/default.key')
                     configDict['cert'] = '/Common/default.crt'
                     configDict['key'] = '/Common/default.crt'
+                if configDict.get('sessionMirroring') and destinationShortVersion < 12.0:
+                    del configDict['sessionMirroring']
+                if configDict.get('allowExpiredCrl') and destinationShortVersion < 12.0:
+                    del configDict['allowExpiredCrl']
+                if configDict.get('sessionTicketTimeout') and destinationShortVersion < 12.0:
+                    try:
+                        del configDict['sessionTicketTimeout']
+                    except:
+                        print('ARGH')
+                if configDict.get('maxActiveHandshakes') and destinationShortVersion < 12.1:
+                    del configDict['maxActiveHandshakes']
+                if configDict.get('allowDynamicRecordSizing') and destinationShortVersion < 12.1:
+                    del configDict['allowDynamicRecordSizing']
+                if configDict.get('bypassOnClientCertFail') and destinationShortVersion < 13.0:
+                    del configDict['bypassOnClientCertFail']
+                if configDict.get('bypassOnHandshakeAlert') and destinationShortVersion < 13.0:
+                    del configDict['bypassOnHandshakeAlert']
+                if configDict.get('notifyCertStatusToVirtualServer') and destinationShortVersion < 13.0:
+                    del configDict['notifyCertStatusToVirtualServer']
+                if configDict.get('maxRenegotiationsPerMinute') and destinationShortVersion < 11.6:
+                    del configDict['maxRenegotiationsPerMinute']
+                if configDict.get('maxAggregateRenegotiationPerMinute') and destinationShortVersion < 11.6:
+                    del configDict['maxAggregateRenegotiationPerMinute']
+                if configDict.get('proxySslPassthrough') and destinationShortVersion < 11.6:
+                    del configDict['proxySslPassthrough']
+                if configDict.get('ocspStapling') and destinationShortVersion < 11.6:
+                    del configDict['ocspStapling']
+                if configDict.get('sslC3d'):
+                    if downgrade:
+                        del configDict['sslC3d']
                 else:
                     if configDict.get('passphrase'):
                         print('Source client-ssl profile: %s contains encrypted passphrase; need to re-obtain passphrase')
@@ -421,7 +468,6 @@ def get_cert_or_key(cryptoFullPath, type):
         for cryptoObject in cryptoDict['items']:
             if cryptoObject['fullPath'] == cryptoFullPath:
                 cryptoDict = cryptoObject
-                print ('Found our crypto object: %s JSON: %s' % (cryptoFullPath, json.dumps(cryptoDict)))
                 break
     return cryptoDict
 
@@ -435,7 +481,7 @@ def get_object_by_link(link):
         objectDict = sourcebip.get('%s?expandSubcollections=true' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
     else:
         objectDict = sourcebip.get('%s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
-    if objectDict.get('defaultsFrom'):
+    if objectDict.get('defaultsFrom') and objectDict.get('defaultsFrom') != 'none':
         print ("Detected Profile Inheritance; fetching %s/%s" % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~")))
         virtualConfig.append(get_object_by_link('%s/%s' % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~"))))
     if objectDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
@@ -609,10 +655,10 @@ if args.destinationbigip and (args.copy or args.put):
     destinationbip = requests.session()
     destinationbip.verify = False
     destpasswd = getConfirmedPassword(args.destinationbigip, user, passwd)
-    destinationSystemInfo = get_system_info(args.destinationbigip, args.user, destpasswd)
+    #destinationData = get_system_info(args.destinationbigip, args.user, destpasswd)
     destinationData = get_system_info(args.destinationbigip, args.user, destpasswd)
-    destinationVersion = destinationSystemInfo['version']
-    destinationShortVersion = float('%s.%s' % (destinationSystemInfo['version'].split(".")[0], destinationSystemInfo['version'].split(".")[1]))
+    destinationVersion = destinationData['version']
+    destinationShortVersion = float('%s.%s' % (destinationData['version'].split(".")[0], destinationData['version'].split(".")[1]))
     destinationAuthHeader = {}
     if destinationShortVersion >= 11.6:
         destinationAuthToken = get_auth_token(args.destinationbigip, args.user, destpasswd)
@@ -620,8 +666,8 @@ if args.destinationbigip and (args.copy or args.put):
         destinationbip.headers.update(destinationAuthHeader)
     else:
         destinationbip.auth = (args.user, destpasswd)
-    print('Destination BIG-IP Hostname: %s' % (destinationSystemInfo['hostname']))
-    print('Destination BIG-IP Software: %s' % (destinationSystemInfo['version']))
+    print('Destination BIG-IP Hostname: %s' % (destinationData['hostname']))
+    print('Destination BIG-IP Software: %s' % (destinationData['version']))
     destinationPostHeaders = destinationAuthHeader
     destinationPostHeaders.update(contentTypeJsonHeader)
     if 'asm' in destinationData['provisionedModules']:
@@ -787,10 +833,10 @@ if args.copy or args.put:
     elif args.copy:
         print ('Copy Mode: beginning copy of virtuals to destination')
     sourceShortVersion = float('%s.%s' % (sourceData['version'].split(".")[0], sourceData['version'].split(".")[1]))
-    destinationShortVersion = float('%s.%s' % (destinationSystemInfo['version'].split(".")[0], destinationSystemInfo['version'].split(".")[1]))
+    destinationShortVersion = float('%s.%s' % (destinationData['version'].split(".")[0], destinationData['version'].split(".")[1]))
     if sourceShortVersion > destinationShortVersion:
         print ('Houston We Have a Problem')
-        downgradeString = 'You are copying configuration data from %s to %s; which is untested and likely to break; proceed?' % (sourceData['version'], destinationSystemInfo['version'])
+        downgradeString = 'You are copying configuration data from %s to %s; which is untested and likely to break; proceed?' % (sourceData['version'], destinationData['version'])
         if query_yes_no(downgradeString, default="no"):
             print('Proceeding with caution; errors are likely.')
             downgrade = True
@@ -808,7 +854,7 @@ if args.copy or args.put:
         partitionMissingString = 'Partition from source not on destination: %s - Create Partition?' % (partition)
         if query_yes_no(partitionMissingString, default="yes"):
             create_partition(partition)
-            destinationData['folders'] = get_folders(args.destinationbigip, username, password)
+            destinationData['folders'] = get_folders(args.destinationbigip, args.user, destpasswd)
         else:
             print('Proceeding without creation of partition: %s' % (partition))
 
