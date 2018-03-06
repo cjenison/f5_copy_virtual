@@ -122,14 +122,22 @@ def get_system_info(bigip, username, password):
     provision = bip.get('https://%s/mgmt/tm/sys/provision/' % (bigip)).json()
     provisionedModules = list()
     for module in provision['items']:
-        if module['level'] != 'none':
-            provisionedModules.append(module['name'])
+        if module.get('level'):
+            if module['level'] != 'none':
+                provisionedModules.append(module['name'])
     print ('Provisioned Modules: %s' % (provisionedModules))
     systemInfo['provisionedModules'] = provisionedModules
     systemInfo['baseMac'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['baseMac']['description']
     systemInfo['marketingName'] = hardware['entries']['https://localhost/mgmt/tm/sys/hardware/platform']['nestedStats']['entries']['https://localhost/mgmt/tm/sys/hardware/platform/0']['nestedStats']['entries']['marketingName']['description']
     version = bip.get('https://%s/mgmt/tm/sys/version/' % (bigip)).json()
-    systemInfo['version'] = version['entries']['https://localhost/mgmt/tm/sys/version/0']['nestedStats']['entries']['Version']['description']
+    if version.get('nestedStats'):
+        systemInfo['version'] = version['entries']['https://localhost/mgmt/tm/sys/version/0']['nestedStats']['entries']['Version']['description']
+    else:
+        volumes = bip.get('https://%s/mgmt/tm/sys/software/volume' % (bigip)).json()
+        for volume in volumes['items']:
+            if volume.get('active'):
+                if volume['active'] == True:
+                    systemInfo['version'] = volume['version']
     systemInfo['hostname'] = globalSettings['hostname']
     systemInfo['provision'] = provision
     print ('hostname: %s' % (systemInfo['hostname']))
@@ -280,19 +288,12 @@ def get_virtual(virtualFullPath):
         else:
             for ruleFullPath in virtualDict['rules']:
                 virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/rule/%s' % (ruleFullPath.replace("/", "~", 2))))
-    if args.ipchange:
-        changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (virtualDict['destination'].split("/")[2].rsplit(":", 1)[0], virtualDict['destination'].split("/")[2].rsplit(":", 1)[1], virtualDict['mask'])
-        if query_yes_no(changeDestination, default="yes"):
-            newDestination = obtain_new_vs_destination(virtualDict['destination'].split("/")[2].rsplit(":", 1)[0], virtualDict['destination'].split("/")[2].rsplit(":", 1)[1], virtualDict['mask'])
-            destinationPartition = virtualDict['destination'].split("/")[1]
-            virtualDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
-            virtualDict['mask'] = newDestination['mask']
     virtualConfig.append(virtualDict)
     print ('Virtual: %s' % (virtualDict['fullPath']))
     return virtualConfig
 
 def put_virtual(virtualFullPath, virtualConfigArray):
-    print('**Processing Virtual: %s to BIG-IP: %s' % (virtualFullPath, args.destinationbigip))
+    print('**Processing Virtual: %s Destination BIG-IP: %s' % (virtualFullPath, args.destinationbigip))
     for configObject in virtualConfigArray:
         put_json(configObject['fullPath'], configObject)
 
@@ -310,6 +311,13 @@ def put_json(fullPath, configDict):
     elif configDict['kind'] == 'tm:security:bot-defense:asm-profile:asm-profilestate':
         print ('Not putting special ASM bot-defense profile: %s' % (configDict['fullPath']))
     else:
+        if configDict['kind'] == 'tm:ltm:virtual:virtualstate' and args.ipchange:
+            changeDestination = 'Source Virtual Server Destination: %s - port: %s mask: %s - Change?' % (configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
+            if query_yes_no(changeDestination, default="yes"):
+                newDestination = obtain_new_vs_destination(configDict['destination'].split("/")[2].rsplit(":", 1)[0], configDict['destination'].split("/")[2].rsplit(":", 1)[1], configDict['mask'])
+                destinationPartition = configDict['destination'].split("/")[1]
+                configDict['destination'] = '/%s/%s:%s' % (destinationPartition, newDestination['ip'], newDestination['port'])
+                configDict['mask'] = newDestination['mask']
         objectUrl = '%s/%s' % (configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1), configDict['fullPath'].replace("/", "~", 2))
         postUrl = configDict['selfLink'].rsplit("/", 1)[0].replace("localhost", args.destinationbigip, 1)
         print ('objectUrl: %s' % (objectUrl))
@@ -639,6 +647,20 @@ if args.sourcebigip and (args.copy or args.write):
         sourcebip.auth = (args.user, sourcepasswd)
     print('Source BIG-IP Hostname: %s' % (sourceData['hostname']))
     print('Source BIG-IP Software: %s' % (sourceData['version']))
+    if 'afm' in sourceData['provisionedModules']:
+        afmConfirm = ('***WARNING*** BIG-IP AFM is provisioned and script does not support AFM configuration; Proceed?')
+        if query_yes_no(afmConfirm, default="no"):
+            print('Proceeding; unpredictable results may occur')
+        else:
+            print('Exiting due to AFM')
+            quit()
+    if 'apm' in sourceData['provisionedModules']:
+        apmConfirm = ('***WARNING*** BIG-IP APM is provisioned and script does not support APM configuration; Proceed?')
+        if query_yes_no(apmConfirm, default="no"):
+            print('Proceeding; unpredictable results may occur')
+        else:
+            print('Exiting due to APM')
+            quit()
     sourcePostHeaders = sourceAuthHeader
     sourcePostHeaders.update(contentTypeJsonHeader)
 
