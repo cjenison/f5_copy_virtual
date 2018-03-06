@@ -168,7 +168,7 @@ def get_passphrase(profileFullPath):
             print ('Passphrases did not match, please re-enter.')
     return passphrase1
 
-def get_cert_and_key(certFullPath, keyFullPath):
+def get_cert_and_key_text(certFullPath, keyFullPath):
     import paramiko
     sourcessh = paramiko.SSHClient()
     sourcessh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -198,60 +198,28 @@ def get_cert_and_key(certFullPath, keyFullPath):
     certWithKey = {'cert': {'fullPath': certFullPath, 'certText': certFile}, 'key': {'fullPath': keyFullPath, 'keyText': keyFile}}
     return certWithKey
 
-def put_cert(fullPath, certText):
-    import paramiko
-    destinationssh = paramiko.SSHClient()
-    destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
-    destinationsftp = destinationssh.open_sftp()
-    destinationsftp.chdir('/tmp/')
-    destinationsftp.mkdir('_copy_virtual')
-    destinationsftp.chdir('_copy_virtual')
-    certFileWrite = destinationsftp.open(fullPath.replace("/", ":"), 'w')
-    certFileWrite.write(certText)
-    certFileWrite.close()
-    certPostPayload = {}
-    certPostPayload['command']='install'
-    certPostPayload['name']=fullPath
-    certPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":"))
-    certPost = destinationbip.post('%s/sys/crypto/cert' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(certPostPayload))
-    if certPost.status_code == 200:
-        print('Successfully Posted Cert: %s to destination BIG-IP' % (fullPath))
-        destinationCertSet.add(fullPath)
+def put_cert_or_key(fullPath, cryptoText, type):
+    destinationFileTransferHeaders = {}
+    destinationFileTransferHeaders['Content-Type']='text/plain; charset=utf-8'
+    destinationFileTransferHeaders['Content-Range']='0-%s/%s' % (len(cryptoText)-1, len(cryptoText))
+    upload=destinationbip.post('https://%s/mgmt/shared/file-transfer/uploads/%s' % (args.destinationbigip, fullPath.split("/")[-1]), headers=destinationFileTransferHeaders, data=cryptoText)
+    if upload.status_code == 200:
+        print('Upload of %s succeeded' % (type))
     else:
-        print('Unsuccessful attempt to post cert: %s to destination with JSON: %s' % (fullPath, certPostPayload))
-        print('Body: %s' % (certPost.content))
-    destinationsftp.remove(fullPath.replace("/", ":"))
-    destinationsftp.rmdir('/tmp/_copy_virtual')
-    destinationsftp.close()
-
-def put_key(fullPath, keyText):
-    import paramiko
-    destinationssh = paramiko.SSHClient()
-    destinationssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    destinationssh.connect(args.destinationbigip, username=args.user, password=passwd, allow_agent=False)
-    destinationsftp = destinationssh.open_sftp()
-    destinationsftp.chdir('/tmp/')
-    destinationsftp.mkdir('_copy_virtual')
-    destinationsftp.chdir('_copy_virtual')
-    keyFileWrite = destinationsftp.open(fullPath.replace("/", ":"), 'w')
-    keyFileWrite.write(keyText)
-    keyFileWrite.close()
-    keyPostPayload = {}
-    keyPostPayload['command']='install'
-    keyPostPayload['name']=fullPath
-    keyPostPayload['from-local-file']='/tmp/_copy_virtual/%s' % (fullPath.replace("/", ":"))
-    keyPost = destinationbip.post('%s/sys/crypto/key' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(keyPostPayload))
-    if keyPost.status_code == 200:
-        print('Successfully Posted Key: %s to destination BIG-IP' % (fullPath))
-        destinationKeySet.add(fullPath)
+        print('Upload of %s failed - Body: %s' % (upload.content))
+    cryptoPostPayload = {}
+    cryptoPostPayload['command']='install'
+    cryptoPostPayload['name']=fullPath
+    cryptoPostPayload['from-local-file']='/var/config/rest/downloads/%s' % (fullPath.split("/")[-1])
+    cryptoPost = destinationbip.post('%s/sys/crypto/%s' % (destinationurl_base, type), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
+    if cryptoPost.status_code == 200:
+        print('Successfully posted %s: %s to destination BIG-IP' % (type, fullPath))
+        if type == 'cert':
+            destinationCertSet.add(fullPath)
     else:
-        print('Unsuccessful attempt to post key: %s to destination with JSON: %s' % (fullPath, keyPostPayload))
-        print('Body: %s' % (keyPost.content))
-    destinationsftp.remove(fullPath.replace("/", ":"))
-    destinationsftp.rmdir('/tmp/_copy_virtual')
-    destinationsftp.close()
-
+        print('Unsuccessful attempt to post %s: %s to destination with JSON: %s' % (type, fullPath, cryptoPostPayload))
+        print('Body: %s' % (cryptoPost.content))
+    generate_cert_key_set()
 
 def get_virtual(virtualFullPath):
     virtualDict = sourcebip.get('%s/ltm/virtual/%s?expandSubcollections=true' % (sourceurl_base, virtualFullPath.replace("/", "~"))).json()
@@ -324,6 +292,14 @@ def put_json(fullPath, configDict):
                 print('Policy: %s already present on destination BIG-IP' % (fullPath))
         else:
             print('BIG-IP ASM not provisioned on destination BIG-IP')
+    elif configDict['kind'] == 'tm:sys:crypto:cert:certstate':
+        if fullPath not in destinationCertSet and not args.nocertandkey:
+            if configDict.get('certText'):
+                put_cert_or_key(configDict['fullPath'], configDict['certText'], 'cert')
+    elif configDict['kind'] == 'tm:sys:crypto:key:keystate':
+        if fullPath not in destinationKeySet and not args.nocertandkey:
+            if configDict.get('keyText'):
+                put_cert_or_key(configDict['fullPath'], configDict['keyText'], 'key')
     elif configDict['kind'] == 'tm:security:bot-defense:asm-profile:asm-profilestate':
         print ('Not putting special ASM bot-defense profile: %s' % (configDict['fullPath']))
     else:
@@ -371,14 +347,6 @@ def put_json(fullPath, configDict):
                 if downgrade:
                     print('Moving policies to older software revisions is not supported; policy: %s not copied' % (fullPath))
                     return
-            elif configDict['kind'] == 'tm:sys:crypto:cert:certstate':
-                if fullPath not in destinationCertSet and not args.nocertandkey:
-                    if configDict.get('certText'):
-                        put_cert(configDict['fullPath'], configDict['certText'])
-            elif configDict['kind'] == 'tm:sys:crypto:key:keystate':
-                if fullPath not in destinationKeySet and not args.nocertandkey:
-                    if configDict.get('keyText'):
-                        put_key(configDict['fullPath'], configDict['keyText'])
             elif configDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
                 ### FIX BELOW TO Handle CertkeyChain properly
                 if configDict.get('certKeyChain'):
@@ -445,9 +413,17 @@ def obtain_new_vs_destination(destination, port, mask):
     destination = {'ip': newDestination, 'port':newPort, 'mask':newMask}
     return destination
 
-def get_cert(certFullPath):
-    certDict = sourcebip.get('%s/sys/crypto/cert/%s' % (sourceurl_base, certFullPath.replace("/", "~"))).json()
-    return certDict
+def get_cert_or_key(cryptoFullPath, type):
+    cryptoDict = sourcebip.get('%s/sys/crypto/%s/%s' % (sourceurl_base, type, cryptoFullPath.replace("/", "~"))).json()
+    ## below code is to handle a bug in 11.5.x iControl REST (path prefix in front of filename isn't handled properly)
+    if cryptoDict.get('code') == 404:
+        cryptoDict = sourcebip.get('%s/sys/crypto/%s/' % (sourceurl_base, type)).json()
+        for cryptoObject in cryptoDict['items']:
+            if cryptoObject['fullPath'] == cryptoFullPath:
+                cryptoDict = cryptoObject
+                print ('Found our crypto object: %s JSON: %s' % (cryptoFullPath, json.dumps(cryptoDict)))
+                break
+    return cryptoDict
 
 def get_key(keyFullPath):
     keyDict = sourcebip.get('%s/sys/crypto/key/%s' % (sourceurl_base, keyFullPath.replace("/", "~"))).json()
@@ -464,13 +440,14 @@ def get_object_by_link(link):
         virtualConfig.append(get_object_by_link('%s/%s' % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~"))))
     if objectDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
         if not args.nocertandkey:
-            cert = get_cert(objectDict['cert'])
-            key = get_key(objectDict['key'])
-            certAndKey = get_cert_and_key(objectDict['cert'], objectDict['key'])
+            print('Copying client-ssl profile: %s - Cert: %s - Key: %s' % (objectDict['name'], objectDict['cert'], objectDict['key']))
+            cert = get_cert_or_key(objectDict['cert'], 'cert')
+            key = get_cert_or_key(objectDict['key'], 'key')
+            certAndKey = get_cert_and_key_text(objectDict['cert'], objectDict['key'])
             cert['certText']=certAndKey['cert']['certText']
             key['keyText']=certAndKey['key']['keyText']
-            virtualConfig.append(cert)
             virtualConfig.append(key)
+            virtualConfig.append(cert)
         else:
             print('May need to adjust profile reference to default.crt and default.key')
             #alter references in profile to default.crt and default.key
@@ -548,6 +525,14 @@ def generate_dest_asm_policy_set():
     for policy in destinationAsmPolicies['items']:
         #print('policy name: %s; policy fullpath: %s' % (policy['name'], policy['fullPath']))
         destinationAsmPolicySet.add(policy['fullPath'])
+
+def generate_cert_key_set():
+    destinationCerts = destinationbip.get('%s/sys/crypto/cert/' % (destinationurl_base)).json()
+    for cert in destinationCerts['items']:
+        destinationCertSet.add(cert['fullPath'])
+    destinationKeys = destinationbip.get('%s/sys/crypto/key/' % (destinationurl_base)).json()
+    for key in destinationKeys['items']:
+        destinationKeySet.add(key['fullPath'])
 
 def put_asm_policy(policyId, policyName, xmlPolicy):
     #policyUpload = destinationbip.post('https://%s/mgmt/tm/asm/file-transfer/uploads/%s.xml' % (args.destinationbigip, policyName), headers=fileUploadHeader, data=xmlPolicy )
@@ -647,13 +632,9 @@ if args.destinationbigip and (args.copy or args.put):
         for virtual in destinationVirtuals['items']:
             destinationVirtualSet.add(virtual['fullPath'])
     destinationCertSet = set()
-    destinationCerts = destinationbip.get('%s/sys/crypto/cert/' % (destinationurl_base)).json()
-    for cert in destinationCerts['items']:
-        destinationCertSet.add(cert['fullPath'])
     destinationKeySet = set()
-    destinationKeys = destinationbip.get('%s/sys/crypto/key/' % (destinationurl_base)).json()
-    for key in destinationKeys['items']:
-        destinationKeySet.add(key['fullPath'])
+    generate_cert_key_set()
+
 
 
 if args.sourcebigip and (args.copy or args.get):
