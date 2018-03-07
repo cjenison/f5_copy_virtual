@@ -1,0 +1,32 @@
+The f5_copy_virtual script understands and attempts to gather the following dependencies for each BIG-IP Local Traffic Manager Virtual Server:
+
+Default Pool
+  Healh Monitor(s)
+  Members
+    Health Monitor(s) - Member Specific
+SNAT Pools
+iRules
+  Datagroup Usage (using text search)
+  iFile
+Profiles (handled generically with specific code for following:
+  (Profile Inheritance/Parent Profiles)
+  Client-SSL
+    Cert
+    Key
+    ChainCert
+    Cipher Group
+    Cipher Rules
+    Passphrase Detection (user prompted when profile with passphrase is POSTd)   
+Persistence Profiles
+Policies
+  Policy Rules
+    Policy Actions
+Policy Strategies (exotic configuration element that is rarely customized)
+ASM Security Policy
+Security Logging Profile
+
+Dependencies not yet addressed:
+BIG-IP APM Configurations
+BIG-IP AFM Configurations
+HTML Profiles (need to implement iterating through the rules and grabbing them)
+Investigate custom server-ssl scenarios and how much of the code for client-ssl can be re-used (probably much)
