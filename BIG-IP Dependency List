@@ -28,7 +28,9 @@ Security Logging Profile
 Dependencies not yet addressed:
 BIG-IP APM Configurations
 BIG-IP AFM Configurations
+Non-default pools referenced in iRules or Local Traffic Policies
 HTML Profiles (need to implement iterating through the rules and grabbing them)
 Investigate custom server-ssl scenarios and how much of the code for client-ssl can be re-used (probably much)
 HSL profiles
 Eviction Policies
+External Datagroups (usage of external datagroups [datagroups generally] is detected in iRules, but external datagroup file isn't currently copied)
