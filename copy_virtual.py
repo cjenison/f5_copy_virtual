@@ -167,33 +167,17 @@ def get_passphrase(profileFullPath):
     return passphrase1
 
 def get_cert_and_key_text(certFullPath, keyFullPath):
-    import paramiko
-    sourcessh = paramiko.SSHClient()
-    sourcessh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    sourcessh.connect(args.sourcebigip, username=args.user, password=passwd, allow_agent=False)
-    sourcesftp = sourcessh.open_sftp()
-    certFolder = certFullPath.split("/")[1]
-    keyFolder = keyFullPath.split("/")[1]
-    filestore_basepath = '/config/filestore/files_d/%s_d' % (certFolder)
-    sourcesftp.chdir('%s/certificate_d' % (filestore_basepath))
-    sourceCertFiles = sourcesftp.listdir()
-    for file in sourceCertFiles:
-        if file.replace(":", "/").startswith(certFullPath):
-            certFilestoreName = file
-    sourcesftp.chdir('%s/certificate_key_d' % (filestore_basepath))
-    sourceKeyFiles = sourcesftp.listdir()
-    for file in sourceKeyFiles:
-        if file.replace(":", "/").startswith(keyFullPath):
-            keyFilestoreName = file
-    certFileRead = sourcesftp.open('%s/certificate_d/%s' % (filestore_basepath, certFilestoreName), 'r')
-    certFile = certFileRead.read()
-    certFileRead.close()
-    keyFileRead = sourcesftp.open('%s/certificate_key_d/%s' % (filestore_basepath, keyFilestoreName), 'r')
-    keyFile = keyFileRead.read()
-    keyFileRead.close()
-    print('Cert: %s' % (certFullPath))
-    print('Key: %s' % (keyFullPath))
-    certWithKey = {'cert': {'fullPath': certFullPath, 'certText': certFile}, 'key': {'fullPath': keyFullPath, 'keyText': keyFile}}
+    #certPartitionFolder = certFullPath.rsplit("/", 1)[0].replace("/", ":")
+    filestoreBasePath = '/config/filestore/files_d'
+    certPartitionFolder = '%s/%s_d/certificate_d/' % (filestoreBasePath, certFullPath.split("/")[1])
+    keyPartitionFolder = '%s/%s_d/certificate_key_d/' % (filestoreBasePath, keyFullPath.split("/")[1])
+    print ('Cert Folder: %s - Key Folder: %s' % (certPartitionFolder, keyPartitionFolder))
+    catCertPayload = { 'command' : 'run', 'utilCmdArgs': '-c \'cat %s/%s*\'' % (certPartitionFolder, certFullPath.replace("/", ":"))}
+    catKeyPayload = { 'command' : 'run', 'utilCmdArgs': '-c \'cat %s/%s*\'' % (keyPartitionFolder, keyFullPath.replace("/", ":"))}
+    certCat = sourcebip.post('%s/util/bash' % (sourceurl_base), headers=sourcePostHeaders, data=json.dumps(catCertPayload)).json()
+    keyCat = sourcebip.post('%s/util/bash' % (sourceurl_base), headers=sourcePostHeaders, data=json.dumps(catKeyPayload)).json()
+    certWithKey = {'cert': {'fullPath': certFullPath, 'certText': certCat['commandResult']}, 'key': {'fullPath': keyFullPath, 'keyText': keyCat['commandResult']}}
+    print json.dumps(certWithKey, indent=4)
     return certWithKey
 
 def put_cert_or_key(fullPath, cryptoText, type):
