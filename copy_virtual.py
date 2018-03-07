@@ -167,7 +167,6 @@ def get_passphrase(profileFullPath):
     return passphrase1
 
 def get_cert_and_key_text(certFullPath, keyFullPath):
-    #certPartitionFolder = certFullPath.rsplit("/", 1)[0].replace("/", ":")
     filestoreBasePath = '/config/filestore/files_d'
     certPartitionFolder = '%s/%s_d/certificate_d/' % (filestoreBasePath, certFullPath.split("/")[1])
     keyPartitionFolder = '%s/%s_d/certificate_key_d/' % (filestoreBasePath, keyFullPath.split("/")[1])
