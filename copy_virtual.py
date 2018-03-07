@@ -37,7 +37,6 @@ parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server
 parser.add_argument('--destsuffix', help='Use a suffix for configuration objects on destination [do not re-use existing objects already on destination]')
 parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 parser.add_argument('--disableondestination', '-dd', help='Disable Virtual Server on Destination BIG-IP as it is copied', action='store_true')
-parser.add_argument('--nocertandkey', '-nck', help='Do not retrieve or push certs/keys and instead alter reference to default.crt and default.key', action='store_true')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 #parser.add_argument('--file', '-f', help='Filename to read or write to')
 parser.add_argument('--noprompt', '-n', help='Do not prompt for confirmation of copying operations', action='store_true')
@@ -166,19 +165,6 @@ def get_passphrase(profileFullPath):
             print ('Passphrases did not match, please re-enter.')
     return passphrase1
 
-def get_cert_and_key_text(certFullPath, keyFullPath):
-    filestoreBasePath = '/config/filestore/files_d'
-    certPartitionFolder = '%s/%s_d/certificate_d/' % (filestoreBasePath, certFullPath.split("/")[1])
-    keyPartitionFolder = '%s/%s_d/certificate_key_d/' % (filestoreBasePath, keyFullPath.split("/")[1])
-    print ('Cert Folder: %s - Key Folder: %s' % (certPartitionFolder, keyPartitionFolder))
-    catCertPayload = { 'command' : 'run', 'utilCmdArgs': '-c \'cat %s/%s*\'' % (certPartitionFolder, certFullPath.replace("/", ":"))}
-    catKeyPayload = { 'command' : 'run', 'utilCmdArgs': '-c \'cat %s/%s*\'' % (keyPartitionFolder, keyFullPath.replace("/", ":"))}
-    certCat = sourcebip.post('%s/util/bash' % (sourceurl_base), headers=sourcePostHeaders, data=json.dumps(catCertPayload)).json()
-    keyCat = sourcebip.post('%s/util/bash' % (sourceurl_base), headers=sourcePostHeaders, data=json.dumps(catKeyPayload)).json()
-    certWithKey = {'cert': {'fullPath': certFullPath, 'certText': certCat['commandResult']}, 'key': {'fullPath': keyFullPath, 'keyText': keyCat['commandResult']}}
-    print json.dumps(certWithKey, indent=4)
-    return certWithKey
-
 def put_cert_or_key(fullPath, cryptoText, type):
     destinationFileTransferHeaders = {}
     destinationFileTransferHeaders['Content-Type']='text/plain; charset=utf-8'
@@ -274,13 +260,13 @@ def put_json(fullPath, configDict):
         else:
             print('BIG-IP ASM not provisioned on destination BIG-IP')
     elif configDict['kind'] == 'tm:sys:crypto:cert:certstate':
-        if fullPath not in destinationCertSet and not args.nocertandkey:
-            if configDict.get('certText'):
-                put_cert_or_key(configDict['fullPath'], configDict['certText'], 'cert')
+        if fullPath not in destinationCertSet:
+            if configDict.get('text'):
+                put_cert_or_key(configDict['fullPath'], configDict['text'], 'cert')
     elif configDict['kind'] == 'tm:sys:crypto:key:keystate':
-        if fullPath not in destinationKeySet and not args.nocertandkey:
-            if configDict.get('keyText'):
-                put_cert_or_key(configDict['fullPath'], configDict['keyText'], 'key')
+        if fullPath not in destinationKeySet:
+            if configDict.get('text'):
+                put_cert_or_key(configDict['fullPath'], configDict['text'], 'key')
     elif configDict['kind'] == 'tm:security:bot-defense:asm-profile:asm-profilestate':
         print ('Not putting special ASM bot-defense profile: %s' % (configDict['fullPath']))
     else:
@@ -379,7 +365,7 @@ def put_json(fullPath, configDict):
                 if downgrade:
                     sslVersionProperties = dict()
                     sslVersionProperties['13.1'] = ['c3dOcsp', 'sslC3d', 'c3dDropUnknownOcspStatus']
-                    sslVersionProperties['13.0'] = ['cipherGroup', 'bypassOnClientCertFail', 'bypassOnHandshakeAlert', 'notifyCertStatusToVirtualServer']
+                    sslVersionProperties['13.0'] = ['cipherGroup', 'cipherGroupReference', 'bypassOnClientCertFail', 'bypassOnHandshakeAlert', 'notifyCertStatusToVirtualServer']
                     sslVersionProperties['12.1'] = ['maxActiveHandshakes', 'allowDynamicRecordSizing', 'maximumRecordSize']
                     sslVersionProperties['12.0'] = ['sessionMirroring', 'allowExpiredCrl', 'sessionTicketTimeout']
                     sslVersionProperties['11.6'] = ['ocspStapling', 'peerNoRenegotiateTimeout', 'maxRenegotiationsPerMinute', 'maxAggregateRenegotiationPerMinute', 'proxySslPassthrough']
@@ -460,13 +446,19 @@ def get_cert_or_key(cryptoFullPath, type):
             if cryptoObject['fullPath'] == cryptoFullPath:
                 cryptoDict = cryptoObject
                 break
-    print ('Getting object: %s' % (cryptoDict['selfLink'].replace("https://localhost/mgmt/tm", "", 1).split("?")[0]))
-    print('Getting %s: %s' % (type, cryptoFullPath))
+    if cryptoFullPath != "/Common/ca-bundle.crt":
+        filestoreBasePath = '/config/filestore/files_d'
+        if type == 'cert':
+            partitionFolder = '%s/%s_d/certificate_d/' % (filestoreBasePath, cryptoFullPath.split("/")[1])
+        else:
+            partitionFolder = '%s/%s_d/certificate_key_d/' % (filestoreBasePath, cryptoFullPath.split("/")[1])
+        catCryptoPayload = { 'command' : 'run', 'utilCmdArgs': '-c \'cat %s%s*\'' % (partitionFolder, cryptoFullPath.replace("/", ":"))}
+        cryptoCatRaw = sourcebip.post('%s/util/bash' % (sourceurl_base), headers=sourcePostHeaders, data=json.dumps(catCryptoPayload))
+        cryptoCat = sourcebip.post('%s/util/bash' % (sourceurl_base), headers=sourcePostHeaders, data=json.dumps(catCryptoPayload)).json()
+        cryptoDict['text']=cryptoCat['commandResult']
+        print ('Getting object: %s' % (cryptoDict['selfLink'].replace("https://localhost/mgmt/tm", "", 1).split("?")[0]))
+        print('Getting %s: %s' % (type, cryptoFullPath))
     return cryptoDict
-
-def get_key(keyFullPath):
-    keyDict = sourcebip.get('%s/sys/crypto/key/%s' % (sourceurl_base, keyFullPath.replace("/", "~"))).json()
-    return keyDict
 
 def get_object_by_link(link):
     print ('Getting object: %s' % (link.replace("https://localhost/mgmt/tm", "", 1).split("?")[0]))
@@ -478,18 +470,27 @@ def get_object_by_link(link):
         print ("Detected Profile Inheritance; fetching %s/%s" % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~")))
         virtualConfig.append(get_object_by_link('%s/%s' % (link.rsplit("/", 1)[0], objectDict['defaultsFrom'].replace("/", "~"))))
     if objectDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
-        if not args.nocertandkey:
+        if objectDict.get('cipherGroupReference'):
+            virtualConfig.append(get_object_by_link(objectDict['cipherGroupReference']['link']))
+        if objectDict.get('certKeyChain'):
+            for certKey in objectDict['certKeyChain']:
+                virtualConfig.append(get_cert_or_key(certKey['key'], 'key'))
+                virtualConfig.append(get_cert_or_key(certKey['cert'], 'cert'))
+                if certKey['chain'] != "none":
+                    virtualConfig.append(get_cert_or_key(certKey['chain'], 'cert'))
+        else:
             print('Getting client-ssl profile: %s - Cert: %s - Key: %s' % (objectDict['name'], objectDict['cert'], objectDict['key']))
             cert = get_cert_or_key(objectDict['cert'], 'cert')
             key = get_cert_or_key(objectDict['key'], 'key')
-            certAndKey = get_cert_and_key_text(objectDict['cert'], objectDict['key'])
-            cert['certText']=certAndKey['cert']['certText']
-            key['keyText']=certAndKey['key']['keyText']
+            #certAndKey = get_cert_and_key_text(objectDict['cert'], objectDict['key'])
+            #cert['text']=certAndKey['cert']['text']
+            #key['text']=certAndKey['key']['text']
             virtualConfig.append(key)
             virtualConfig.append(cert)
-        else:
-            print('May need to adjust profile reference to default.crt and default.key')
-            #alter references in profile to default.crt and default.key
+    elif objectDict['kind'] == 'tm:ltm:cipher:group:groupstate':
+        for ruleGroup in ['allow', 'exclude', 'require']:
+            for ruleItem in objectDict.get(ruleGroup):
+                virtualConfig.append(get_object_by_link(ruleItem['nameReference']['link']))
     elif objectDict['kind'] == 'tm:ltm:policy:policystate':
         virtualConfig.append(get_policy_strategy(objectDict['strategy']))
     elif objectDict['kind'] == 'tm:ltm:rule:rulestate':
@@ -510,6 +511,8 @@ def get_object_by_link(link):
             virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/data-group/%s/%s' % (sourceDatagroupTypeDict[matchedDatagroup], matchedDatagroup.replace("/", "~"))))
             #virtualConfig.append(get_datagroup(matchedDatagroup))
         ifileHits = set()
+        iRulePoolMatches = set()
+        # Implement code to check for "pool <poolname>" in iRule code to identify pool dependencies
         for ifile in sourceIfileSet:
             if ifile.split("/")[1] == 'Common':
                 ifilename = ifile.split("/")[2]
