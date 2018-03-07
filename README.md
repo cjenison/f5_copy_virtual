@@ -1,8 +1,8 @@
-#H1 f5_copy_virtual
+f5_copy_virtual
 
-#H2 Overview: This script's intent is to copy a virtual server and all referenced dependencies (e.g. pools, iRules, profiles) to a destination.
+Overview: This script's intent is to copy a virtual server and all referenced dependencies (e.g. pools, iRules, profiles) to a destination.
 
-#H3 It uses iControl REST (available in BIG-IP 11.5.x+) to accomplish this and leverages the JSON data format used by iControl as a representation of the BIG-IP configuration.
+It uses iControl REST (available in BIG-IP 11.5.x+) to accomplish this and leverages the JSON data format used by iControl as a representation of the BIG-IP configuration.
 
 It has three modes of operation:
 - get: Retrieve configuration from one or more virtual servers and output a file with the virtual servers and all dependencies
