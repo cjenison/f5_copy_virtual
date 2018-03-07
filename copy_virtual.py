@@ -366,6 +366,25 @@ def put_json(fullPath, configDict):
                     print ('Attempting Downgrading of policy')
                     #print('Moving policies to older software revisions is not supported; policy: %s not copied' % (fullPath))
                     #return
+            elif configDict['kind'] == 'tm:ltm:profile:http:httpstate':
+                if downgrade:
+                    if configDict.get('proxyType') == 'reverse':
+                        del configDict['explicitProxy']
+                    if configDict.get('enforcement').get('knownMethods'):
+                        del configDict['enforcement']['knownMethods']
+                    if configDict.get('hsts'):
+                        del configDict['hsts']
+            elif configDict['kind'] == 'tm:ltm:profile:tcp:tcpstate':
+                if downgrade:
+                    # Need to Sort These Problem Properties by which version they showed up in
+                    tcpDowngradeProperties = ['nagle', 'autoReceiveWindowSize', 'ratePaceMaxRate', 'fastOpen', 'fastOpenCookieExpiration', 'cmetricsCacheTimeout', 'autoSendBufferSize', 'synCookieWhitelist', 'hardwareSynCookie', 'ipTtlMode', 'ipTtlV4', 'ipTtlV6', 'autoProxyBufferSize', 'ipDfMode', 'earlyRetransmit', 'tailLossProbe', 'rexmtThresh', 'pushFlag', 'enhancedLossRecovery', 'synCookieEnable', 'finWait_2Timeout']
+                    mptcpProperties = ['mpctp', 'mptcpCsum', 'mptcpCsumVerify', 'mptcpDebug', 'mptcpDebug', 'mptcpFallback', 'mpctcpFastjoin', 'mptcpIdleTimeout', 'mptcpJoinMax', 'mptcpMakeafterbreak', 'mptcpNojoindssack', 'mptcpRtomax', 'mptcpRxmitmin', 'mptcpSubflowmax', 'mptcpTimeout']
+                    allBadProperties = tcpDowngradeProperties + mptcpProperties
+                    for property in allBadProperties:
+                        try:
+                            del configDict[property]
+                        except:
+                            pass
             elif configDict['kind'] == 'tm:ltm:profile:client-ssl:client-sslstate':
                 ### FIX BELOW TO Handle CertkeyChain properly
                 if configDict.get('certKeyChain'):
