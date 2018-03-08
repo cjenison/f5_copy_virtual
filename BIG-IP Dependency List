@@ -19,6 +19,8 @@ Profiles (handled generically with specific code for following:
     Cipher Rules
     Passphrase Detection (user prompted when profile with passphrase is POSTd)   
 Persistence Profiles
+  Universal Persistence (special)
+    iRule used by Universal Persistence Profile
 Policies
   Policy Rules
     Policy Actions
