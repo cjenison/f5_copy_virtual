@@ -32,12 +32,12 @@ virtual.add_argument('--allvirtuals', '-a', help="Select all virtual servers on 
 parser.add_argument('--sourcebigip', '-s', help='IP or hostname of Source BIG-IP Management or Self IP')
 parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destination BIG-IP Management or Self IP')
 parser.add_argument('--user', '-u', help='username to use for authentication', required=True)
-parser.add_argument('--pass', '-pwd', help='password to use for authentication(discouraged) password gathered via prompt if not provided')
 parser.add_argument('--file', '-f', help='file for read or write')
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
-#parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
+parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 parser.add_argument('--disableondestination', '-dd', help='Disable Virtual Server on Destination BIG-IP as it is copied', action='store_true')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
+parser.add_argument('--postlog', help='Generate Log File of all POSTs to destination server')
 #parser.add_argument('--file', '-f', help='Filename to read or write to')
 parser.add_argument('--noprompt', '-n', help='Do not prompt for confirmation of copying operations', action='store_true')
 
@@ -170,6 +170,9 @@ def put_cert_or_key(fullPath, cryptoText, type):
     destinationFileTransferHeaders['Content-Type']='text/plain; charset=utf-8'
     destinationFileTransferHeaders['Content-Range']='0-%s/%s' % (len(cryptoText)-1, len(cryptoText))
     upload=destinationbip.post('https://%s/mgmt/shared/file-transfer/uploads/%s' % (args.destinationbigip, fullPath.split("/")[-1]), headers=destinationFileTransferHeaders, data=cryptoText)
+    if args.postlog:
+        postLog.write('----\nRequest: POST https://%s/mgmt/shared/file-transfer/uploads/%s\n' % (args.destinationbigip, fullPath.split("/")[-1]))
+        postLog.write('----\nPayload:\n%s\n----\nResponse:\n%s\n' % (cryptoText, upload.content))
     if upload.status_code == 200:
         print('Upload of %s succeeded' % (type))
     else:
@@ -179,6 +182,9 @@ def put_cert_or_key(fullPath, cryptoText, type):
     cryptoPostPayload['name']=fullPath
     cryptoPostPayload['from-local-file']='/var/config/rest/downloads/%s' % (fullPath.split("/")[-1])
     cryptoPost = destinationbip.post('%s/sys/crypto/%s' % (destinationurl_base, type), headers=destinationPostHeaders, data=json.dumps(cryptoPostPayload))
+    if args.postlog:
+        postLog.write('----\nRequest: POST https://%s/sys/crypto/%s\n' % (args.destinationbigip, type))
+        postLog.write('----\nPayload:\n%s\n----\nResponse:\n%s\n' % (json.dumps(cryptoPostPayload), cryptoPost.content))
     if cryptoPost.status_code == 200:
         print('Successfully posted %s: %s to destination BIG-IP' % (type, fullPath))
         if type == 'cert':
@@ -254,7 +260,7 @@ def put_virtual(virtualFullPath, virtualConfigArray):
 def put_json(fullPath, configDict):
     #print('kind: %s' % (configDict['kind']))
     if configDict['kind'] == 'tm:asm:custom:asmpolicy':
-        if 'asm' in destinationData['provisionedModules']:
+        if 'asm' in destinationData['systemInfo']['provisionedModules']:
             if fullPath not in destinationAsmPolicySet:
                 put_asm_policy(configDict['policyId'], configDict['policyName'], configDict['xmlPolicy'])
                 destinationAsmPolicySet.add(configDict['fullPath'])
@@ -290,10 +296,8 @@ def put_json(fullPath, configDict):
                         configDict['mask'] = newDestination['mask']
                         print ('New Destination: %s - port: %s mask: %s' % (newDestination['ip'], newDestination['port'], newDestination['mask']))
                 if args.disableondestination:
-                    try:
+                    if configDict.get('enabled'):
                         del configDict['enabled']
-                    except:
-                        pass
                     configDict['disabled'] = True
                 ### Observed problems posting this to Old BIG-IP; Investigate
                 if configDict.get('serviceDownImmediateAction'):
@@ -307,9 +311,12 @@ def put_json(fullPath, configDict):
                     if destinationShortVersion < 11.6:
                         del member['fqdn']
                     ## Not sure why we need to delete this property, but we do
-                    del member['session']
-                    del member['state']
-                    del member['ephemeral']
+                    try:
+                        del member['session']
+                        del member['state']
+                        del member['ephemeral']
+                    except:
+                        pass
             elif configDict['kind'] == 'tm:ltm:snatpool:snatpoolstate':
                 if configDict.get('membersReference'):
                     del configDict['membersReference']
@@ -388,6 +395,9 @@ def put_json(fullPath, configDict):
                     configDict['passphrase'] = get_passphrase(configDict['fullPath'])
             print ('Posting to: %s' % (postUrl))
             destinationObjectPost = destinationbip.post(postUrl, headers=destinationPostHeaders, data=json.dumps(configDict))
+            if args.postlog:
+                postLog.write('----\nRequest: POST %s' % (postUrl))
+                postLog.write('----\nPayload:\n%s\n----\nResponse:\n%s\n' % (json.dumps(configDict), destinationObjectPost.content))
             if destinationObjectPost.status_code == 200:
                 if configDict['kind'] == 'tm:ltm:policy:policystate' and destinationShortVersion >= 12.1:
                     draftFullPath = '/%s/Drafts/%s' % (configDict['partition'], configDict['name'])
@@ -481,8 +491,9 @@ def get_object_by_link(link):
             for certKey in objectDict['certKeyChain']:
                 virtualConfig.append(get_cert_or_key(certKey['key'], 'key'))
                 virtualConfig.append(get_cert_or_key(certKey['cert'], 'cert'))
-                if certKey['chain'] != "none":
-                    virtualConfig.append(get_cert_or_key(certKey['chain'], 'cert'))
+                if certKey.get('chain'):
+                    if certKey['chain'] != "none":
+                        virtualConfig.append(get_cert_or_key(certKey['chain'], 'cert'))
         else:
             print('Getting client-ssl profile: %s - Cert: %s - Key: %s' % (objectDict['name'], objectDict['cert'], objectDict['key']))
             cert = get_cert_or_key(objectDict['cert'], 'cert')
@@ -492,21 +503,12 @@ def get_object_by_link(link):
             #key['text']=certAndKey['key']['text']
             virtualConfig.append(key)
             virtualConfig.append(cert)
-    elif objectDict['kind'] == 'tm:ltm:persistence:universal:universalstate':
-        if objectDict.get('rule') and not objectDict.get('rule') == 'none':
-            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/rule/%s' % (objectDict['rule'].replace("/", "~"))))
     elif objectDict['kind'] == 'tm:ltm:cipher:group:groupstate':
         for ruleGroup in ['allow', 'exclude', 'require']:
             for ruleItem in objectDict.get(ruleGroup):
                 virtualConfig.append(get_object_by_link(ruleItem['nameReference']['link']))
     elif objectDict['kind'] == 'tm:ltm:policy:policystate':
         virtualConfig.append(get_policy_strategy(objectDict['strategy']))
-        # Search for pool selections in Policy Actions
-        for rule in objectDict['rulesReference']['items']:
-            for item in rule['actionsReference']['items']:
-                if item.get('pool'):
-                    print ('Detected a Policy Action selecting pool: %s' % (item['pool']))
-                    virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (item['pool'].replace("/", "~"))))
     elif objectDict['kind'] == 'tm:ltm:rule:rulestate':
         datagroupHits = set()
         for datagroup in sourceDatagroupSet:
@@ -533,11 +535,8 @@ def get_object_by_link(link):
                 searchString = 'ifile get \"%s\"' % (ifilename)
                 if searchString in objectDict['apiAnonymous']:
                     ifileHits.add(ifile)
-                    print ('Detected a possible iFile dependency in iRule: %s for ifile: %s [Please resolve this manually by adding the iFile on destination]' % (objectDict['fullPath'], ifile))
-        for pool in sourcePoolSet:
-            if 'pool %s' % pool in objectDict['apiAnonymous'] or 'pool %s' % pool.split("/")[-1] in objectDict['apiAnonymous']:
-                print ('Got an iRule match for pool: %s on rule: %s' % (objectDict['fullPath'], pool))
-                virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (pool.replace("/", "~"))))
+                    print ('Detected a possible iFile dependency in iRule: %s for ifile: %s [Please resolve this manually]' % (objectDict['fullPath'], ifile))
+
     elif objectDict['kind'] == "tm:ltm:pool:poolstate":
         if objectDict.get('monitor'):
             for monitor in objectDict['monitor'].strip().split(' and '):
@@ -598,10 +597,13 @@ def put_asm_policy(policyId, policyName, xmlPolicy):
     #print ('policyUpload Response: %s' % (policyUpload.content))
     #print ('policyUploadResponse: %s' % (policyUpload.content))
     ### Add a check to see that ASM is provisioned
-    if 'asm' in destinationData['provisionedModules']:
+    if 'asm' in destinationData['systemInfo']['provisionedModules']:
         print ('we have ASM')
         policyImportPayload = {'file': xmlPolicy, 'status': 'NEW' }
         importPolicyTask = destinationbip.post('%s/asm/tasks/import-policy' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(policyImportPayload)).json()
+        if args.postlog:
+            postLog.write('----\nRequest: POST %s/asm/tasks/import-policy\n' % (destinationurl_base))
+            postLog.write('----\nPayload:\nASM Policy XML (trimmed to 100 bytes)\n%s\n----Response:\n%s\n' % (xmlPolicy[0:99], json.dumps(importPolicyTask)))
         taskId = importPolicyTask['id']
         print ('upload taskId: %s' % (taskId))
         taskDone = False
@@ -642,6 +644,9 @@ def get_asm_policy(policyId, policyName, policyFullPath):
 def create_folder(fullPath):
     createFolderPayload = {'name' : fullPath}
     folderPost = destinationbip.post('%s/sys/folder/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(createFolderPayload))
+    if args.postlog:
+        postLog.write('----\nRequest: POST %s\n' % ('%s/sys/folder/' % (destinationurl_base)))
+        postLog.write('----\nPayload:\n%s\n----\nResponse:\n%s\n' % (json.dumps(createFolderPayload), folderPost.content))
     if folderPost.status_code == 200:
         print('Created folder: %s' % (fullPath))
     else:
@@ -651,6 +656,9 @@ def create_folder(fullPath):
 def create_partition(name):
     createPartitionPayload = {'name' : name}
     partitionPost = destinationbip.post('%s/auth/partition/' % (destinationurl_base), headers=destinationPostHeaders, data=json.dumps(createPartitionPayload))
+    if args.postlog:
+        postLog.write('----\nRequest: POST %s\n' % ('%s/auth/partition/' % (destinationurl_base)))
+        postLog.write('----\nPayload:\n%s\n----\nResponse:\n%s\n' % (json.dumps(createPartitionPayload), partitionPost.content))
     if partitionPost.status_code == 200:
         print('Created partition: %s' % (name))
     else:
@@ -669,9 +677,10 @@ if args.destinationbigip and (args.copy or args.put):
     destinationbip.verify = False
     destpasswd = getConfirmedPassword(args.destinationbigip, user, passwd)
     #destinationData = get_system_info(args.destinationbigip, args.user, destpasswd)
-    destinationData = get_system_info(args.destinationbigip, args.user, destpasswd)
-    destinationVersion = destinationData['version']
-    destinationShortVersion = float('%s.%s' % (destinationData['version'].split(".")[0], destinationData['version'].split(".")[1]))
+    destinationData = {}
+    destinationData['systemInfo'] = get_system_info(args.destinationbigip, args.user, destpasswd)
+    destinationVersion = destinationData['systemInfo']['version']
+    destinationShortVersion = float('%s.%s' % (destinationData['systemInfo']['version'].split(".")[0], destinationData['systemInfo']['version'].split(".")[1]))
     destinationAuthHeader = {}
     if destinationShortVersion >= 11.6:
         destinationAuthToken = get_auth_token(args.destinationbigip, args.user, destpasswd)
@@ -679,11 +688,11 @@ if args.destinationbigip and (args.copy or args.put):
         destinationbip.headers.update(destinationAuthHeader)
     else:
         destinationbip.auth = (args.user, destpasswd)
-    print('Destination BIG-IP Hostname: %s' % (destinationData['hostname']))
-    print('Destination BIG-IP Software: %s' % (destinationData['version']))
+    print('Destination BIG-IP Hostname: %s' % (destinationData['systemInfo']['hostname']))
+    print('Destination BIG-IP Software: %s' % (destinationData['systemInfo']['version']))
     destinationPostHeaders = destinationAuthHeader
     destinationPostHeaders.update(contentTypeJsonHeader)
-    if 'asm' in destinationData['provisionedModules']:
+    if 'asm' in destinationData['systemInfo']['provisionedModules']:
         generate_dest_asm_policy_set()
     destinationVirtualSet = set()
     destinationVirtuals = destinationbip.get('%s/ltm/virtual/' % (destinationurl_base)).json()
@@ -702,9 +711,10 @@ if args.sourcebigip and (args.copy or args.get):
     sourcebip.verify = False
     sourcepasswd = getConfirmedPassword(args.sourcebigip, user, passwd)
     #sourceSystemInfo = get_system_info(args.sourcebigip, args.user, sourcepasswd)
-    sourceData = get_system_info(args.sourcebigip, args.user, sourcepasswd)
-    sourceVersion = sourceData['version']
-    sourceShortVersion = float('%s.%s' % (sourceData['version'].split(".")[0], sourceData['version'].split(".")[1]))
+    sourceData = {}
+    sourceData['systemInfo'] = get_system_info(args.sourcebigip, args.user, sourcepasswd)
+    sourceVersion = sourceData['systemInfo']['version']
+    sourceShortVersion = float('%s.%s' % (sourceData['systemInfo']['version'].split(".")[0], sourceData['systemInfo']['version'].split(".")[1]))
     sourceAuthHeader = {}
     if sourceShortVersion >= 11.6:
         sourceAuthToken = get_auth_token(args.sourcebigip, args.user, sourcepasswd)
@@ -712,16 +722,16 @@ if args.sourcebigip and (args.copy or args.get):
         sourcebip.headers.update(sourceAuthHeader)
     else:
         sourcebip.auth = (args.user, sourcepasswd)
-    print('Source BIG-IP Hostname: %s' % (sourceData['hostname']))
-    print('Source BIG-IP Software: %s' % (sourceData['version']))
-    if 'afm' in sourceData['provisionedModules']:
+    print('Source BIG-IP Hostname: %s' % (sourceData['systemInfo']['hostname']))
+    print('Source BIG-IP Software: %s' % (sourceData['systemInfo']['version']))
+    if 'afm' in sourceData['systemInfo']['provisionedModules']:
         afmConfirm = ('***WARNING*** BIG-IP AFM is provisioned and script does not support AFM configuration; Proceed?')
         if query_yes_no(afmConfirm, default="no"):
             print('Proceeding; unpredictable results may occur')
         else:
             print('Exiting due to AFM')
             quit()
-    if 'apm' in sourceData['provisionedModules']:
+    if 'apm' in sourceData['systemInfo']['provisionedModules']:
         apmConfirm = ('***WARNING*** BIG-IP APM is provisioned and script does not support APM configuration; Proceed?')
         if query_yes_no(apmConfirm, default="no"):
             print('Proceeding; unpredictable results may occur')
@@ -748,13 +758,6 @@ if args.sourcebigip and (args.copy or args.get):
         for profile in botdefenseProfilesDict['items']:
             sourceAsmBotdefenseProfiles.add(profile['fullPath'])
 
-    sourceApmAccessProfiles = set()
-    apmAccessProfiles = sourcebip.get('%s/mgmt/tm/apm/profile/access' % (sourceurl_base))
-    if apmAccessProfiles.status_code == 200:
-        apmAccessProfilesDict = json.loads(apmAccessProfiles.content)
-        for profile in apmAccessProfiles['items']:
-            sourceApmAccesProfiles.add(profile['fullPath'])
-
     sourcePersistenceTypeDict = dict()
     sourcePersistenceProfiles = sourcebip.get('%s/ltm/persistence/' % (sourceurl_base)).json()
     for persistenceProfile in sourcePersistenceProfiles['items']:
@@ -780,12 +783,6 @@ if args.sourcebigip and (args.copy or args.get):
         for virtual in sourceVirtuals['items']:
             sourceVirtualDict[virtual['name']] = virtual['fullPath']
             sourceVirtualSet.add(virtual['fullPath'])
-
-    sourcePoolSet = set()
-    sourcePools = sourcebip.get('%s/ltm/pool/' % (sourceurl_base)).json()
-    if sourcePools.get('items'):
-        for pool in sourcePools['items']:
-            sourcePoolSet.add(pool['fullPath'])
 
     sourceAsmVirtualSet = set()
     sourceAsmPolicyIdNameDict = dict()
@@ -852,23 +849,25 @@ if args.copy or args.get:
 
 
 if args.copy or args.put:
+    if args.postlog:
+        postLog = open(args.postlog, 'w')
     if args.put:
         print('Reading Virtual Config Data from file: %s' % (args.put))
         with open(args.file, 'r') as fileIn:
             sourceData = json.load(fileIn)
     elif args.copy:
         print ('Copy Mode: beginning copy of virtuals to destination')
-    sourceShortVersion = float('%s.%s' % (sourceData['version'].split(".")[0], sourceData['version'].split(".")[1]))
-    destinationShortVersion = float('%s.%s' % (destinationData['version'].split(".")[0], destinationData['version'].split(".")[1]))
+    sourceShortVersion = float('%s.%s' % (sourceData['systemInfo']['version'].split(".")[0], sourceData['systemInfo']['version'].split(".")[1]))
+    destinationShortVersion = float('%s.%s' % (destinationData['systemInfo']['version'].split(".")[0], destinationData['systemInfo']['version'].split(".")[1]))
     if sourceShortVersion > destinationShortVersion:
         print ('Houston We Have a Problem')
-        downgradeString = 'You are copying configuration data from %s to %s; which is untested and likely to break; proceed?' % (sourceData['version'], destinationData['version'])
+        downgradeString = 'You are copying configuration data from %s to %s; which is untested and likely to break; proceed?' % (sourceData['systemInfo']['version'], destinationData['systemInfo']['version'])
         if query_yes_no(downgradeString, default="no"):
             print('Proceeding with caution; errors are likely.')
             downgrade = True
         else:
             quit()
-    for module in set(sourceData['provisionedModules']) - set(destinationData['provisionedModules']):
+    for module in set(sourceData['systemInfo']['provisionedModules']) - set(destinationData['systemInfo']['provisionedModules']):
         moduleMissingString = 'Module from source not on destination: %s - Continue (no to exit)?' % (module)
         if query_yes_no(moduleMissingString, default="no"):
             print('High Possibility of problems due to lack of consistent module provisioning on source and destination')
@@ -876,17 +875,17 @@ if args.copy or args.put:
             quit()
 
     # Need to account for missing partitions on destination BIG-IP First - partition will hold string like "Common" (no parantheses)
-    for partition in set(sourceData['partitions']) - set(destinationData['partitions']):
+    for partition in set(sourceData['systemInfo']['partitions']) - set(destinationData['systemInfo']['partitions']):
         partitionMissingString = 'Partition from source not on destination: %s - Create Partition?' % (partition)
         if query_yes_no(partitionMissingString, default="yes"):
             create_partition(partition)
-            destinationData['folders'] = get_folders(args.destinationbigip, args.user, destpasswd)
+            destinationData['systemInfo']['folders'] = get_folders(args.destinationbigip, args.user, destpasswd)
         else:
             print('Proceeding without creation of partition: %s' % (partition))
 
     # Creation of a Partition (e.g. Public) creates a top level folder (e.g. /Public) but you can also have folders inside any "partition" folder (e.g. /Common/qa or /Public/qa)
     # Creation of a partition will require regeneration of partition list for machine
-    for folder in sorted(set(sourceData['folders']) - set(destinationData['folders'])):
+    for folder in sorted(set(sourceData['systemInfo']['folders']) - set(destinationData['systemInfo']['folders'])):
         folderMissingString = 'Folder from source not on destination: %s - Create Folder?' % (folder)
         if query_yes_no(folderMissingString, default="yes"):
             create_folder(folder)
