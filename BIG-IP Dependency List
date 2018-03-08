@@ -22,6 +22,7 @@ Persistence Profiles
 Policies
   Policy Rules
     Policy Actions
+      Pools Referenced in Policy Actions
 Policy Strategies (exotic configuration element that is rarely customized)
 ASM Security Policy
 Security Logging Profile
@@ -35,3 +36,4 @@ Investigate custom server-ssl scenarios and how much of the code for client-ssl 
 HSL profiles
 Eviction Policies
 External Datagroups (usage of external datagroups [datagroups generally] is detected in iRules, but external datagroup file isn't currently copied)
+iRule re-selections of alternative clientssl/serverssl profiles, or any other type of profile than be overriden in iRule
