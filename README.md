@@ -23,3 +23,4 @@ Note that the JSON BLOBs in each virtualListConfig have the following characteri
 - Consequently the Virtual Server JSON Blob is the last item in each virtualListConfig
 - With only a few exceptions (primarily configuration objects that have a file associated with them) the data in the file is unmodified from the "GET" that was issued to the source machine.
 - For SSL Key and Cert files, an additional item 'text' has been inserted by the code to include the text version of the key or cert
+- Since the JSON object size is generally not large, the code may serialize a dependency for a virtual server (e.g. a health monitor or pool) more than once in the virtualListConfig; on read/put when the virtualListConfig is being POST'd to a BIG-IP; if a repeat occurence of a configuration object is encountered after the first occurence, the code for PUT'ing will simply see that the object is already in place and move on.
