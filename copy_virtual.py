@@ -469,7 +469,6 @@ def get_object_by_link(link):
     print ('Getting object: %s' % (link.replace("https://localhost/mgmt/tm", "", 1).split("?")[0]))
     if '/ltm/pool/' in link or '/ltm/policy/' in link:
         objectDict = sourcebip.get('%s?expandSubcollections=true' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
-        print ('Pool or Policy Response: %s' % (json.dumps(objectDict)))
     else:
         objectDict = sourcebip.get('%s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
     if objectDict.get('defaultsFrom') and objectDict.get('defaultsFrom') != 'none':
@@ -493,6 +492,9 @@ def get_object_by_link(link):
             #key['text']=certAndKey['key']['text']
             virtualConfig.append(key)
             virtualConfig.append(cert)
+    elif objectDict['kind'] == 'tm:ltm:persistence:universal:universalstate':
+        if objectDict.get('rule') and not objectDict.get('rule') == 'none':
+            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/rule/%s' % (objectDict['rule'].replace("/", "~"))))
     elif objectDict['kind'] == 'tm:ltm:cipher:group:groupstate':
         for ruleGroup in ['allow', 'exclude', 'require']:
             for ruleItem in objectDict.get(ruleGroup):
@@ -536,8 +538,6 @@ def get_object_by_link(link):
             if 'pool %s' % pool in objectDict['apiAnonymous'] or 'pool %s' % pool.split("/")[-1] in objectDict['apiAnonymous']:
                 print ('Got an iRule match for pool: %s on rule: %s' % (objectDict['fullPath'], pool))
                 virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (pool.replace("/", "~"))))
-
-
     elif objectDict['kind'] == "tm:ltm:pool:poolstate":
         if objectDict.get('monitor'):
             for monitor in objectDict['monitor'].strip().split(' and '):
