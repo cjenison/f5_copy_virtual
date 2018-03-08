@@ -34,7 +34,7 @@ parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destinat
 parser.add_argument('--user', '-u', help='username to use for authentication', required=True)
 parser.add_argument('--file', '-f', help='file for read or write')
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
-parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
+#parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 parser.add_argument('--disableondestination', '-dd', help='Disable Virtual Server on Destination BIG-IP as it is copied', action='store_true')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 parser.add_argument('--postlog', help='Generate Log File of all POSTs to destination server')
@@ -508,7 +508,15 @@ def get_object_by_link(link):
             for ruleItem in objectDict.get(ruleGroup):
                 virtualConfig.append(get_object_by_link(ruleItem['nameReference']['link']))
     elif objectDict['kind'] == 'tm:ltm:policy:policystate':
+        for rule in objectDict['rulesReference']['items']:
+            for item in rule['actionsReference']['items']:
+                if item.get('pool'):
+                    print ('Detected a Policy Action selecting pool: %s' % (item['pool']))
+                    virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (item['pool'].replace("/", "~"))))
         virtualConfig.append(get_policy_strategy(objectDict['strategy']))
+    elif objectDict['kind'] == 'tm:ltm:persistence:universal:universalstate':
+        if objectDict.get('rule') and not objectDict.get('rule') == 'none':
+            virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/rule/%s' % (objectDict['rule'].replace("/", "~"))))
     elif objectDict['kind'] == 'tm:ltm:rule:rulestate':
         datagroupHits = set()
         for datagroup in sourceDatagroupSet:
@@ -529,6 +537,10 @@ def get_object_by_link(link):
         ifileHits = set()
         iRulePoolMatches = set()
         # Implement code to check for "pool <poolname>" in iRule code to identify pool dependencies
+        for pool in sourcePoolSet:
+            if 'pool %s' % pool in objectDict['apiAnonymous'] or 'pool %s' % pool.split("/")[-1] in objectDict['apiAnonymous']:
+                print ('Got an iRule match for pool: %s on rule: %s' % (objectDict['fullPath'], pool))
+                virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (pool.replace("/", "~"))))
         for ifile in sourceIfileSet:
             if ifile.split("/")[1] == 'Common':
                 ifilename = ifile.split("/")[2]
@@ -751,6 +763,13 @@ if args.sourcebigip and (args.copy or args.get):
             for profile in profileTypeCollection['items']:
                 sourceProfileTypeDict[profile['fullPath']] = typeUrlFragment
 
+    sourceApmAccessProfiles = set()
+    apmAccessProfiles = sourcebip.get('%s/mgmt/tm/apm/profile/access' % (sourceurl_base))
+    if apmAccessProfiles.status_code == 200:
+        apmAccessProfilesDict = json.loads(apmAccessProfiles.content)
+        for profile in apmAccessProfiles['items']:
+            sourceApmAccesProfiles.add(profile['fullPath'])
+
     sourceAsmBotdefenseProfiles = set()
     botdefenseProfiles = sourcebip.get('%s/security/bot-defense/asm-profile/' % (sourceurl_base))
     if botdefenseProfiles.status_code == 200:
@@ -801,6 +820,12 @@ if args.sourcebigip and (args.copy or args.get):
         for ifile in sourceIfiles['items']:
             sourceIfileSet.add(ifile['fullPath'])
     #print('sourceIfileSet: %s' % (sourceIfileSet))
+
+    sourcePoolSet = set()
+    sourcePools = sourcebip.get('%s/ltm/pool/' % (sourceurl_base)).json()
+    if sourcePools.get('items'):
+        for pool in sourcePools['items']:
+            sourcePoolSet.add(pool['fullPath'])
 
     sourceDatagroupSet = set()
     sourceDatagroupTypeDict = dict()
