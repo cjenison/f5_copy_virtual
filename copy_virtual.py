@@ -32,10 +32,10 @@ virtual.add_argument('--allvirtuals', '-a', help="Select all virtual servers on 
 parser.add_argument('--sourcebigip', '-s', help='IP or hostname of Source BIG-IP Management or Self IP')
 parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destination BIG-IP Management or Self IP')
 parser.add_argument('--user', '-u', help='username to use for authentication', required=True)
+parser.add_argument('--pass', '-pwd', help='password to use for authentication(discouraged) password gathered via prompt if not provided')
 parser.add_argument('--file', '-f', help='file for read or write')
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
-parser.add_argument('--destsuffix', help='Use a suffix for configuration objects on destination [do not re-use existing objects already on destination]')
-parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
+#parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 parser.add_argument('--disableondestination', '-dd', help='Disable Virtual Server on Destination BIG-IP as it is copied', action='store_true')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 #parser.add_argument('--file', '-f', help='Filename to read or write to')
@@ -213,6 +213,9 @@ def get_virtual(virtualFullPath):
             if profile['fullPath'] in sourceAsmBotdefenseProfiles:
                 print ('Found Reference to automagic ASM bot-defense profile on virtual - removing (it gets regenerated when applied)')
                 badProfiles.append(index)
+            elif profile['fullPath'] in sourceApmAccessProfiles:
+                print ('***Virtual Server: %s has an APM Access Profile: %s attached; this script doesn\'t support APM currrently, aborting!' % (virtualFullPath, profile))
+                quit()
             else:
                 if profile.get('nameReference'):
                     virtualConfig.append(get_object_by_link(profile['nameReference']['link']))
@@ -287,8 +290,10 @@ def put_json(fullPath, configDict):
                         configDict['mask'] = newDestination['mask']
                         print ('New Destination: %s - port: %s mask: %s' % (newDestination['ip'], newDestination['port'], newDestination['mask']))
                 if args.disableondestination:
-                    if configDict.get('enabled'):
+                    try:
                         del configDict['enabled']
+                    except:
+                        pass
                     configDict['disabled'] = True
                 ### Observed problems posting this to Old BIG-IP; Investigate
                 if configDict.get('serviceDownImmediateAction'):
@@ -464,6 +469,7 @@ def get_object_by_link(link):
     print ('Getting object: %s' % (link.replace("https://localhost/mgmt/tm", "", 1).split("?")[0]))
     if '/ltm/pool/' in link or '/ltm/policy/' in link:
         objectDict = sourcebip.get('%s?expandSubcollections=true' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
+        print ('Pool or Policy Response: %s' % (json.dumps(objectDict)))
     else:
         objectDict = sourcebip.get('%s' % (link.replace("localhost", args.sourcebigip, 1).split("?")[0])).json()
     if objectDict.get('defaultsFrom') and objectDict.get('defaultsFrom') != 'none':
@@ -493,6 +499,12 @@ def get_object_by_link(link):
                 virtualConfig.append(get_object_by_link(ruleItem['nameReference']['link']))
     elif objectDict['kind'] == 'tm:ltm:policy:policystate':
         virtualConfig.append(get_policy_strategy(objectDict['strategy']))
+        # Search for pool selections in Policy Actions
+        for rule in objectDict['rulesReference']['items']:
+            for item in rule['actionsReference']['items']:
+                if item.get('pool'):
+                    print ('Detected a Policy Action selecting pool: %s' % (item['pool']))
+                    virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (item['pool'].replace("/", "~"))))
     elif objectDict['kind'] == 'tm:ltm:rule:rulestate':
         datagroupHits = set()
         for datagroup in sourceDatagroupSet:
@@ -519,16 +531,22 @@ def get_object_by_link(link):
                 searchString = 'ifile get \"%s\"' % (ifilename)
                 if searchString in objectDict['apiAnonymous']:
                     ifileHits.add(ifile)
-                    print ('Detected a possible iFile dependency in iRule: %s for ifile: %s [Please resolve this manually]' % (objectDict['fullPath'], ifile))
+                    print ('Detected a possible iFile dependency in iRule: %s for ifile: %s [Please resolve this manually by adding the iFile on destination]' % (objectDict['fullPath'], ifile))
+        for pool in sourcePoolSet:
+            if 'pool %s' % pool in objectDict['apiAnonymous'] or 'pool %s' % pool.split("/")[-1] in objectDict['apiAnonymous']:
+                print ('Got an iRule match for pool: %s on rule: %s' % (objectDict['fullPath'], pool))
+                virtualConfig.append(get_object_by_link('https://localhost/mgmt/tm/ltm/pool/%s' % (pool.replace("/", "~"))))
+
 
     elif objectDict['kind'] == "tm:ltm:pool:poolstate":
         if objectDict.get('monitor'):
             for monitor in objectDict['monitor'].strip().split(' and '):
                 virtualConfig.append(get_monitor(monitor))
-        for member in objectDict['membersReference']['items']:
-            if member['monitor'] != 'default':
-                for monitor in member['monitor'].strip().split(' and '):
-                    virtualConfig.append(get_monitor(monitor))
+        if objectDict.get('membersReference').get('items'):
+            for member in objectDict['membersReference']['items']:
+                if member['monitor'] != 'default':
+                    for monitor in member['monitor'].strip().split(' and '):
+                        virtualConfig.append(get_monitor(monitor))
     return objectDict
 
 def get_object(profileReference):
@@ -730,6 +748,13 @@ if args.sourcebigip and (args.copy or args.get):
         for profile in botdefenseProfilesDict['items']:
             sourceAsmBotdefenseProfiles.add(profile['fullPath'])
 
+    sourceApmAccessProfiles = set()
+    apmAccessProfiles = sourcebip.get('%s/mgmt/tm/apm/profile/access' % (sourceurl_base))
+    if apmAccessProfiles.status_code == 200:
+        apmAccessProfilesDict = json.loads(apmAccessProfiles.content)
+        for profile in apmAccessProfiles['items']:
+            sourceApmAccesProfiles.add(profile['fullPath'])
+
     sourcePersistenceTypeDict = dict()
     sourcePersistenceProfiles = sourcebip.get('%s/ltm/persistence/' % (sourceurl_base)).json()
     for persistenceProfile in sourcePersistenceProfiles['items']:
@@ -755,6 +780,12 @@ if args.sourcebigip and (args.copy or args.get):
         for virtual in sourceVirtuals['items']:
             sourceVirtualDict[virtual['name']] = virtual['fullPath']
             sourceVirtualSet.add(virtual['fullPath'])
+
+    sourcePoolSet = set()
+    sourcePools = sourcebip.get('%s/ltm/pool/' % (sourceurl_base)).json()
+    if sourcePools.get('items'):
+        for pool in sourcePools['items']:
+            sourcePoolSet.add(pool['fullPath'])
 
     sourceAsmVirtualSet = set()
     sourceAsmPolicyIdNameDict = dict()
