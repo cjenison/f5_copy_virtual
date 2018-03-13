@@ -34,6 +34,7 @@ parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destinat
 parser.add_argument('--user', '-u', help='username to use for authentication', required=True)
 parser.add_argument('--file', '-f', help='file for read or write')
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
+parser.add_argument('--nochain', '-nc', help='Don\'t retrieve text of chain cert via sftp')
 #parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 parser.add_argument('--disableondestination', '-dd', help='Disable Virtual Server on Destination BIG-IP as it is copied', action='store_true')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
@@ -452,7 +453,34 @@ def obtain_new_vs_destination(destination, port, mask):
     destination = {'ip': newDestination, 'port':newPort, 'mask':newMask}
     return destination
 
+def get_cert_or_key_via_sftp(cryptoFullPath, type):
+    import paramiko
+    sourcessh = paramiko.SSHClient()
+    sourcessh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    sourcessh.connect(args.sourcebigip, username=args.user, password=passwd, allow_agent=False)
+    sourcesftp = sourcessh.open_sftp()
+    filestore_basepath = '/config/filestore/files_d'
+    cryptoPartition = cryptoFullPath.split(("/"))[1]
+    if type == 'cert':
+        cryptoFilestorePath = '%s/%s_d/certificate_d/' % (filestore_basepath, cryptoPartition)
+    elif type == 'key':
+        cryptoFilestorePath = '%s/%s_d/certificate_key_d/' % (filestore_basepath, cryptoPartition)
+    sourcesftp.chdir(cryptoFilestorePath)
+    sourceCryptoFiles = sourcesftp.listdir()
+    for file in sourceCryptoFiles:
+        if file.replace(":", "/").startswith(cryptoFullPath):
+            cryptoFilename = file
+    cryptoFileRead = sourcesftp.open('%s/%s' % (cryptoFilestorePath, cryptoFilename), 'r')
+    cryptoFile = cryptoFileRead.read()
+    cryptoFileRead.close()
+    return cryptoFile
+
+
 def get_cert_or_key(cryptoFullPath, type):
+    isChainCert = False
+    if type == 'chaincert':
+        isChainCert = True
+        type = 'cert'
     cryptoDict = sourcebip.get('%s/sys/crypto/%s/%s' % (sourceurl_base, type, cryptoFullPath.replace("/", "~"))).json()
     ## below code is to handle a bug in 11.5.x iControl REST (path prefix in front of filename isn't handled properly)
     if cryptoDict.get('code') == 404:
@@ -461,18 +489,21 @@ def get_cert_or_key(cryptoFullPath, type):
             if cryptoObject['fullPath'] == cryptoFullPath:
                 cryptoDict = cryptoObject
                 break
-    if cryptoFullPath != "/Common/ca-bundle.crt":
-        filestoreBasePath = '/config/filestore/files_d'
-        if type == 'cert':
-            partitionFolder = '%s/%s_d/certificate_d/' % (filestoreBasePath, cryptoFullPath.split("/")[1])
-        else:
-            partitionFolder = '%s/%s_d/certificate_key_d/' % (filestoreBasePath, cryptoFullPath.split("/")[1])
+    filestoreBasePath = '/config/filestore/files_d'
+    if type == 'cert':
+        partitionFolder = '%s/%s_d/certificate_d/' % (filestoreBasePath, cryptoFullPath.split("/")[1])
+    elif type == 'key':
+        partitionFolder = '%s/%s_d/certificate_key_d/' % (filestoreBasePath, cryptoFullPath.split("/")[1])
+    if not isChainCert:
         catCryptoPayload = { 'command' : 'run', 'utilCmdArgs': '-c \'cat %s%s*\'' % (partitionFolder, cryptoFullPath.replace("/", ":"))}
         cryptoCatRaw = sourcebip.post('%s/util/bash' % (sourceurl_base), headers=sourcePostHeaders, data=json.dumps(catCryptoPayload))
         cryptoCat = sourcebip.post('%s/util/bash' % (sourceurl_base), headers=sourcePostHeaders, data=json.dumps(catCryptoPayload)).json()
-        cryptoDict['text']=cryptoCat['commandResult']
-        print ('Getting object: %s' % (cryptoDict['selfLink'].replace("https://localhost/mgmt/tm", "", 1).split("?")[0]))
-        print('Getting %s: %s' % (type, cryptoFullPath))
+        cryptoDict['text'] = cryptoCat['commandResult']
+    else:
+        cryptoDict['text'] = get_cert_or_key_via_sftp(cryptoFullPath, type)
+        print ('Chain Cert: %s' % (cryptoDict['text']))
+    print ('Getting object: %s' % (cryptoDict['selfLink'].replace("https://localhost/mgmt/tm", "", 1).split("?")[0]))
+    print('Getting %s: %s' % (type, cryptoFullPath))
     return cryptoDict
 
 def get_object_by_link(link):
@@ -492,15 +523,13 @@ def get_object_by_link(link):
                 virtualConfig.append(get_cert_or_key(certKey['key'], 'key'))
                 virtualConfig.append(get_cert_or_key(certKey['cert'], 'cert'))
                 if certKey.get('chain'):
-                    if certKey['chain'] != "none":
-                        virtualConfig.append(get_cert_or_key(certKey['chain'], 'cert'))
+                    print ('Chain Cert Referenced: Not retrieving chain cert bundle - Please ensure installation of chain cert on destination')
+                    #if certKey['chain'] != "none":
+                    #    virtualConfig.append(get_cert_or_key(certKey['chain'], 'chaincert'))
         else:
             print('Getting client-ssl profile: %s - Cert: %s - Key: %s' % (objectDict['name'], objectDict['cert'], objectDict['key']))
             cert = get_cert_or_key(objectDict['cert'], 'cert')
             key = get_cert_or_key(objectDict['key'], 'key')
-            #certAndKey = get_cert_and_key_text(objectDict['cert'], objectDict['key'])
-            #cert['text']=certAndKey['cert']['text']
-            #key['text']=certAndKey['key']['text']
             virtualConfig.append(key)
             virtualConfig.append(cert)
     elif objectDict['kind'] == 'tm:ltm:cipher:group:groupstate':
