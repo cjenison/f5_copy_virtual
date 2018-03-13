@@ -13,7 +13,7 @@ In general, the code tries to handle this as generically as possible.
 
 The output file format is as follows:
 {
- Top-level items/keys are meta-data about the source BIG-IP (e.g. MAC address, hostname, software revisions, provisioning
+ systemInfo: {Top-level items/keys are meta-data about the source BIG-IP (e.g. MAC address, hostname, software revisions, provisioning}
  virtuals: [array of {virtua]} items]
    {virtual}: { virtualFullPath: "sourceFullPath for virtual server", virtualListConfig: [{JSON BLOB1},{JSON BLOB2}] 
 }
