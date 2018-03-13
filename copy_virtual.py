@@ -34,7 +34,6 @@ parser.add_argument('--destinationbigip', '-d', help='IP or hostname of Destinat
 parser.add_argument('--user', '-u', help='username to use for authentication', required=True)
 parser.add_argument('--file', '-f', help='file for read or write')
 parser.add_argument('--ipchange', '-i', help='Prompt user for new Virtual Server IP (Destination)', action='store_true')
-parser.add_argument('--nochain', '-nc', help='Don\'t retrieve text of chain cert via sftp')
 #parser.add_argument('--disableonsource', '-ds', help='Disable Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
 parser.add_argument('--disableondestination', '-dd', help='Disable Virtual Server on Destination BIG-IP as it is copied', action='store_true')
 parser.add_argument('--removeonsource', '-remove', help='Remove Virtual Server on Source BIG-IP if successfully copied to destination', action='store_true')
