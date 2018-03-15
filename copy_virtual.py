@@ -705,6 +705,9 @@ def create_partition(name):
         print('Creation of partition: %s - FAILED' % (name))
         print('Response: %s' % (partitionPost.content))
 
+if (args.get or args.put) and not args.file:
+    print ('When mode --get or --put is used; a --file argument is required; exiting...')
+    quit()
 user = args.user
 passwd = getpass.getpass('Enter Password for %s:' % (user))
 
