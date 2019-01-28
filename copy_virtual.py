@@ -26,6 +26,7 @@ mode = parser.add_mutually_exclusive_group(required=True)
 mode.add_argument('--copy', '-c', help='Copy from source to destination BIG-IP (online for both systems)', action='store_true')
 mode.add_argument('--get', '-g', help='Get JSON from source and produce file output', action='store_true')
 mode.add_argument('--put', '-p', help='Put JSON file input to Destination BIG-IP', action='store_true')
+mode.add_argument('--generateas3', '-gas3' help='Generate Application Services 3 Declaration', action'store_true')
 virtual = parser.add_mutually_exclusive_group(required=True)
 virtual.add_argument('--virtual', '-v', nargs='*', help='Virtual server(s) to select on source (example: vs-1 or /Public/vs-1)')
 virtual.add_argument('--allvirtuals', '-a', help="Select all virtual servers on source", action='store_true')
@@ -748,7 +749,7 @@ if args.destinationbigip and (args.copy or args.put):
 
 
 
-if args.sourcebigip and (args.copy or args.get):
+if args.sourcebigip and (args.copy or args.get or args.generateas3):
     sourceurl_base = ('https://%s/mgmt/tm' % (args.sourcebigip))
     sourcebip = requests.session()
     sourcebip.verify = False
@@ -876,7 +877,7 @@ if args.sourcebigip and (args.copy or args.get):
 virtualsList = []
 downgrade = False
 
-if args.copy or args.get:
+if args.copy or args.get or args.generateas3:
     sourceData['kind'] = 'f5:unofficial:virtual:copy:utility:data'
     if args.virtual is not None:
         virtuals = args.virtual
@@ -901,6 +902,9 @@ if args.copy or args.get:
     if args.get:
         with open(args.file, 'w') as fileOut:
             json.dump(sourceData, fileOut, indent=4, sort_keys=True)
+    if args.generateas3:
+        #with open(args.file, 'w') as fileOut:
+        #    json.dump(sourceData, fileOut, indent=4, sort_keys=True)
 
 
 
